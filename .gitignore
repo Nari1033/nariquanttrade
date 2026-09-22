@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# macOS
+.DS_Store
+
+# Runtime data caches (regenerated on first run; sample data IS tracked)
+data/cache/*
+!data/cache/.gitkeep
