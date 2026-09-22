@@ -28,6 +28,7 @@ from engine.backtester import (
 from engine.bollinger import backtest_bollinger_mean_reversion, bollinger_bands, bollinger_oversold_recent
 from engine.options_backtester import backtest_bull_put_spread
 from engine.cash_secured_put import backtest_cash_secured_put
+from engine.wheel import backtest_wheel_strategy
 from engine.scanner import golden_cross_recent, price_cross_sma_recent
 
 
@@ -116,6 +117,15 @@ def _cash_secured_put_scan(bars, lookback_days: int = 3, **kwargs) -> bool:
     return price_cross_sma_recent(
         bars, sma_window=int(trend_sma_window), lookback_days=lookback_days, direction="above"
     )
+
+
+def _wheel_scan(bars, lookback_days: int = 3, **kwargs) -> bool:
+    # The wheel has no trend filter -- selling a put is always the next
+    # step once flat, regardless of trend (that's the whole premise: you'd
+    # be happy to own the stock). So "eligible" here just means "enough
+    # price history to price an option at all," not a timing signal.
+    vol_window = int(kwargs.get("vol_window", 20))
+    return len(bars) >= vol_window + 5
 
 
 STRATEGIES: List[Strategy] = [
@@ -253,6 +263,36 @@ STRATEGIES: List[Strategy] = [
         ],
         scan_fn=_cash_secured_put_scan,
         backtest_fn=backtest_cash_secured_put,
+    ),
+    Strategy(
+        id="wheel",
+        label="The Wheel (options)",
+        description=(
+            "A three-step cycle: sell cash-secured puts while flat (target "
+            "delta ~0.20, for roughly an 80% chance of expiring worthless); if "
+            "assigned, take the shares; then sell covered calls against them "
+            "until they're called away, and start over. No trend filter -- the "
+            "whole premise is being happy to own the stock through a dip, not "
+            "timing entries. Same Black-Scholes modeling caveats as the other "
+            "options strategies apply -- see the engine.options_pricing module "
+            "docstring."
+        ),
+        params=[
+            NumberParam(
+                "put_delta", "Put delta", 0.20, 0.05, 0.50, step=0.05, is_int=False,
+                help="Target delta magnitude of the cash-secured put sold while flat.",
+            ),
+            NumberParam(
+                "call_delta", "Call delta", 0.20, 0.05, 0.50, step=0.05, is_int=False,
+                help="Target delta of the covered call sold while holding the shares.",
+            ),
+            NumberParam(
+                "dte_days", "Days to expiration", 30, 5, 90, step=1, is_int=True,
+                help="Days to expiration at entry, for both the puts and the calls.",
+            ),
+        ],
+        scan_fn=_wheel_scan,
+        backtest_fn=backtest_wheel_strategy,
     ),
 ]
 

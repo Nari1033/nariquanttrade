@@ -25,6 +25,7 @@ from .options_pricing import (
 )
 from .options_backtester import backtest_bull_put_spread
 from .cash_secured_put import backtest_cash_secured_put
+from .wheel import backtest_wheel_strategy
 from .bollinger import (
     bollinger_bands,
     bollinger_signals,
@@ -57,6 +58,7 @@ __all__ = [
     "realized_volatility",
     "backtest_bull_put_spread",
     "backtest_cash_secured_put",
+    "backtest_wheel_strategy",
     "bollinger_bands",
     "bollinger_signals",
     "bollinger_oversold_recent",

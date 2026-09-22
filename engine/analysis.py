@@ -9,10 +9,11 @@ Generic by design: works from `Trade` objects plus the two equity curves
 this app already produces. It has no strategy-specific branching -- it
 reads `Trade.meta.get("exit_reason")` generically (covers every value any
 strategy in this app can set: "profit_target", "stop_loss",
-"band_rejection", "expiration", "period_end", or absent entirely for the
-plain SMA crossover strategies), so it applies automatically to every
-current and future `Strategy` entry in app/strategies.py with no app.py
-changes needed per strategy.
+"band_rejection", "expiration", "period_end", "expired_worthless",
+"assigned", "called_away", or absent entirely for the plain SMA crossover
+strategies), so it applies automatically to every current and future
+`Strategy` entry in app/strategies.py with no app.py changes needed per
+strategy.
 
 Two things can each pull cumulative performance behind buy & hold, and a
 given trade can show either, both, or neither:
@@ -39,6 +40,9 @@ _EXIT_REASON_LABELS = {
     "band_rejection": "the position was closed on the mean-reversion sell signal",
     "expiration": "the option reached expiration",
     "period_end": "the window ended while the position was still open",
+    "expired_worthless": "the option expired worthless (the full premium was kept)",
+    "assigned": "the put was assigned (shares were bought at the strike)",
+    "called_away": "the covered call was assigned (shares were sold at the strike)",
 }
 
 # Below this, a price move is treated as noise rather than a cause worth

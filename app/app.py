@@ -572,6 +572,10 @@ def render_backtest_panel(strategy: Strategy, key_prefix: str) -> None:
         # mislabel Bollinger's stock entry/exit prices as "Credit/debit".
         has_strikes = any(t.meta.get("short_strike") is not None for t in visible_trades)
         has_exit_reason = any(t.meta.get("exit_reason") for t in visible_trades)
+        # Generic, not wheel-specific -- any strategy whose trades carry a
+        # meta["leg"] (currently just the Wheel, cycling between put and
+        # call legs) gets this column; everything else doesn't.
+        has_leg = any(t.meta.get("leg") for t in visible_trades)
         price_label = "Credit/debit" if has_strikes else "Price"
         trade_rows = [
             {
@@ -581,6 +585,7 @@ def render_backtest_panel(strategy: Strategy, key_prefix: str) -> None:
                 f"Exit {price_label.lower()}": round(t.exit_price, 2),
                 "Return": f"{t.return_pct:+.1f}%",
                 "Result": "Win" if t.is_win else "Loss",
+                "Leg": t.meta.get("leg", "").capitalize(),
                 "Exit reason": t.meta.get("exit_reason", ""),
                 "Short strike": t.meta.get("short_strike", ""),
                 "Long strike": t.meta.get("long_strike", ""),
@@ -590,6 +595,8 @@ def render_backtest_panel(strategy: Strategy, key_prefix: str) -> None:
             for t in visible_trades
         ]
         trade_df = pd.DataFrame(trade_rows)
+        if not has_leg:
+            trade_df = trade_df.drop(columns=["Leg"])
         if not has_exit_reason:
             trade_df = trade_df.drop(columns=["Exit reason"])
         if not has_strikes:
