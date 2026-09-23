@@ -13,10 +13,18 @@ Data source is selectable in the sidebar:
   - "Sample data (offline demo)" - bundled SYNTHETIC csvs, works with zero
     setup. Clearly NOT real market data. Daily bars only on disk; weekly/
     monthly are resampled on the fly; hourly isn't available.
-  - "Live (yfinance)" - real historical data via the free yfinance package.
-    Requires `pip install yfinance` and internet access. Live fetches are
-    cached to disk (see app/cache.py) so re-running a scan/backtest doesn't
-    re-hit the API every time -- see the cache controls in the sidebar.
+  - "Live (Public.com)" - real historical data via the Public.com brokerage
+    API (see app/public_client.py). Requires a `PUBLIC_API_SECRET`
+    configured (env var or Streamlit secrets) and internet access. Live
+    fetches are cached to disk (see app/cache.py) so re-running a
+    scan/backtest doesn't re-hit the API every time -- see the cache
+    controls in the sidebar.
+
+There's also a standalone "Live Option Chain" tab that shows Public.com's
+real *current* option chain (bid/ask/greeks/open interest) for a ticker.
+It's informational only -- Public.com has no historical options data, so
+the options strategy backtests below still price options with Black-Scholes
+against the underlying's own realized volatility, exactly as before.
 """
 
 from __future__ import annotations
@@ -31,11 +39,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import pandas as pd
 import streamlit as st
 
-from app import cache
+from app import cache, public_client
 from app.charts import plot_equity_curves, plot_price_with_signals
 from app.data_provider import (
-    fetch_yfinance_ticker,
-    fetch_yfinance_universe,
+    fetch_public_ticker,
+    fetch_public_universe,
     list_sample_tickers,
     load_sample_ticker,
     range_key as data_range_key,
@@ -81,15 +89,15 @@ DEFAULT_SWEEP_PERIODS = [
 st.sidebar.title("Data source")
 source_label = st.sidebar.radio(
     "Where should price data come from?",
-    ["Sample data (offline demo)", "Live (yfinance)"],
+    ["Sample data (offline demo)", "Live (Public.com)"],
     index=0,
     help=(
         "Sample data is bundled synthetic price history so the app works "
-        "immediately with no setup. Switch to Live once you `pip install "
-        "yfinance` and have internet access, to scan/backtest real tickers."
+        "immediately with no setup. Switch to Live once PUBLIC_API_SECRET "
+        "is configured, to scan/backtest real tickers against real history."
     ),
 )
-source = "sample" if source_label.startswith("Sample") else "yfinance"
+source = "sample" if source_label.startswith("Sample") else "public"
 
 if source == "sample":
     st.sidebar.caption(
@@ -102,10 +110,19 @@ if source == "sample":
     cache_max_age_hours = 12.0
     force_refresh = False
 else:
-    st.sidebar.caption(
-        "Live mode uses the free `yfinance` package (no API key). Requires "
-        "`pip install yfinance` and outbound internet access."
-    )
+    if public_client.has_secret():
+        st.sidebar.caption(
+            "Live mode uses the Public.com brokerage API for real historical "
+            "price bars. Read-only market data — no orders are ever placed."
+        )
+    else:
+        st.sidebar.error(
+            "No `PUBLIC_API_SECRET` configured, so Live mode can't fetch real "
+            "data yet. Set it as an environment variable, or add it under "
+            "`.streamlit/secrets.toml` locally / the app's Settings → Secrets "
+            "on Streamlit Community Cloud. Generate one at "
+            "public.com/settings/security/api."
+        )
     st.sidebar.subheader("Local cache")
     st.sidebar.caption(
         "Fetched data is saved to `data/cache/` and reused instead of "
@@ -189,7 +206,7 @@ with st.expander("👋 New here? Here's what QuantTrade does", expanded=True):
     st.markdown("")
     st.info(
         "**Getting started:** the sidebar defaults to bundled sample data, so "
-        "everything works instantly with zero setup. Switch to **Live (yfinance)** "
+        "everything works instantly with zero setup. Switch to **Live (Public.com)** "
         "there once you want to scan or backtest real tickers.",
         icon="💡",
     )
@@ -326,7 +343,7 @@ def render_scanner_panel(strategy: Strategy, key_prefix: str) -> None:
                     except ValueError:
                         missing.append(t)
             else:
-                universe = fetch_yfinance_universe(
+                universe = fetch_public_universe(
                     tickers,
                     start=scan_start,
                     end=scan_end,
@@ -356,7 +373,7 @@ def render_scanner_panel(strategy: Strategy, key_prefix: str) -> None:
             last_close = df["close"].iloc[-1] if len(df) else None
             last_date = df.index[-1].date() if len(df) else None
             cache_age = (
-                cache.cache_age_hours(ticker, scan_key, scan_interval) if source == "yfinance" else None
+                cache.cache_age_hours(ticker, scan_key, scan_interval) if source == "public" else None
             )
             rows.append(
                 {
@@ -427,7 +444,7 @@ def render_backtest_panel(strategy: Strategy, key_prefix: str) -> None:
         st.error("Start date must be before end date.")
         return
     if source == "sample" and bt_interval == "1h":
-        st.error("Sample data is daily-only. Switch to Live (yfinance) for hourly bars.")
+        st.error("Sample data is daily-only. Switch to Live (Public.com) for hourly bars.")
         return
 
     # Fetch extra history before bt_start so the slowest SMA in this
@@ -442,7 +459,7 @@ def render_backtest_panel(strategy: Strategy, key_prefix: str) -> None:
             if source == "sample":
                 df = load_sample_ticker(bt_ticker, start=fetch_start, end=bt_end, interval=bt_interval)
             else:
-                df = fetch_yfinance_ticker(
+                df = fetch_public_ticker(
                     bt_ticker,
                     start=fetch_start,
                     end=bt_end,
@@ -639,6 +656,77 @@ def render_backtest_panel(strategy: Strategy, key_prefix: str) -> None:
         st.info("No completed trades in this window — the signal never triggered.")
 
 
+def render_option_chain_panel() -> None:
+    st.caption(
+        "Public.com's real, *current* option chain -- live bid/ask, last price, volume, "
+        "open interest, and greeks. This is a live snapshot only: Public.com doesn't expose "
+        "historical options data, so nothing here feeds the backtests above -- those keep "
+        "pricing options with Black-Scholes against the underlying's own realized volatility."
+    )
+
+    if not public_client.has_secret():
+        st.warning(
+            "No `PUBLIC_API_SECRET` configured. Set it as an environment variable, or add it "
+            "under `.streamlit/secrets.toml` locally / the app's Settings → Secrets on "
+            "Streamlit Community Cloud, to use this tab. Generate one at "
+            "public.com/settings/security/api."
+        )
+        return
+
+    col1, col2 = st.columns([1, 2])
+    with col1:
+        chain_ticker = st.text_input("Ticker", value="AAPL", key="chain_ticker").strip().upper()
+        load_expirations = st.button("Load expirations", key="chain_load_expirations")
+
+    if load_expirations:
+        try:
+            with st.spinner(f"Loading {chain_ticker} option expirations..."):
+                expirations = public_client.fetch_option_expirations(chain_ticker)
+        except public_client.PublicApiError as exc:
+            st.error(str(exc))
+            expirations = []
+        st.session_state["chain_expirations"] = expirations
+        st.session_state["chain_expirations_ticker"] = chain_ticker
+
+    expirations = st.session_state.get("chain_expirations", [])
+    expirations_ticker = st.session_state.get("chain_expirations_ticker")
+
+    if expirations_ticker != chain_ticker or not expirations:
+        st.info("Enter a ticker and click **Load expirations** to pick an expiration date.")
+        return
+
+    with col2:
+        expiration = st.selectbox("Expiration", expirations, key="chain_expiration")
+
+    if st.button("Load option chain", type="primary", key="chain_load_chain"):
+        try:
+            with st.spinner(f"Loading {chain_ticker} {expiration} option chain..."):
+                chain = public_client.fetch_option_chain(chain_ticker, expiration)
+        except public_client.PublicApiError as exc:
+            st.error(str(exc))
+            return
+
+        calls_df = pd.DataFrame(chain["calls"])
+        puts_df = pd.DataFrame(chain["puts"])
+        col_calls, col_puts = st.columns(2)
+        with col_calls:
+            st.markdown(f"**Calls** — {chain_ticker} {expiration}")
+            if calls_df.empty:
+                st.caption("No call contracts returned.")
+            else:
+                st.dataframe(
+                    calls_df.drop(columns=["symbol"]), use_container_width=True, hide_index=True
+                )
+        with col_puts:
+            st.markdown(f"**Puts** — {chain_ticker} {expiration}")
+            if puts_df.empty:
+                st.caption("No put contracts returned.")
+            else:
+                st.dataframe(
+                    puts_df.drop(columns=["symbol"]), use_container_width=True, hide_index=True
+                )
+
+
 def render_sweep_panel() -> None:
     st.caption(
         "Try many parameter combinations for one strategy against one ticker, across "
@@ -752,7 +840,7 @@ def render_sweep_panel() -> None:
             if source == "sample":
                 df = load_sample_ticker(sweep_ticker, start=fetch_start, end=fetch_end, interval="1d")
             else:
-                df = fetch_yfinance_ticker(
+                df = fetch_public_ticker(
                     sweep_ticker,
                     start=fetch_start,
                     end=fetch_end,
@@ -854,7 +942,11 @@ def render_sweep_panel() -> None:
 # automatically -- no other app.py changes needed.
 # ---------------------------------------------------------------------------
 
-main_tab_labels = ["🔍 Scanner"] + [f"📈 {s.label}" for s in STRATEGIES] + ["🧪 Parameter Sweep"]
+main_tab_labels = (
+    ["🔍 Scanner"]
+    + [f"📈 {s.label}" for s in STRATEGIES]
+    + ["⚡ Live Option Chain (Public.com)", "🧪 Parameter Sweep"]
+)
 main_tabs = st.tabs(main_tab_labels)
 
 with main_tabs[0]:
@@ -868,9 +960,12 @@ with main_tabs[0]:
     scanner_strategy = strategy_by_label[chosen_label]
     render_scanner_panel(scanner_strategy, key_prefix=scanner_strategy.id)
 
-for strategy, backtest_tab in zip(STRATEGIES, main_tabs[1:-1]):
+for strategy, backtest_tab in zip(STRATEGIES, main_tabs[1:-2]):
     with backtest_tab:
         render_backtest_panel(strategy, key_prefix=strategy.id)
+
+with main_tabs[-2]:
+    render_option_chain_panel()
 
 with main_tabs[-1]:
     render_sweep_panel()

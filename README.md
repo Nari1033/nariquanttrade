@@ -12,9 +12,14 @@ A small Python app with two pieces:
    that just triggered a crossover) and a **Backtest** tab (pick a ticker +
    timeframe, see strategy vs. buy & hold, trade log, equity curve).
 
-Data can come from the free `yfinance` package (real tickers, needs
-internet) or from bundled **synthetic** sample data (works instantly,
-offline, no API key — see the disclaimer below).
+Data can come from the [Public.com](https://public.com/api/docs) brokerage
+API (real tickers, needs a `PUBLIC_API_SECRET` and internet — see
+"Live data setup" below) or from bundled **synthetic** sample data (works
+instantly, offline, no API key — see the disclaimer below). There's also a
+standalone **Live Option Chain** tab showing Public.com's real *current*
+option bid/ask/greeks/open interest for a ticker (informational only —
+Public.com has no historical options data, so the options strategy
+backtests still price options with Black-Scholes, exactly as before).
 
 ---
 
@@ -31,20 +36,37 @@ streamlit run app/app.py
 ```
 
 The GUI defaults to "Sample data (offline demo)" so it works immediately.
-Switch the sidebar to "Live (yfinance)" to scan/backtest real tickers once
-you have internet access.
+Switch the sidebar to "Live (Public.com)" to scan/backtest real tickers
+once you have a `PUBLIC_API_SECRET` configured (see below).
+
+### Live data setup (Public.com)
+
+1. Generate a secret at [public.com/settings/security/api](https://public.com/settings/security/api).
+2. Make it available to the app as `PUBLIC_API_SECRET` — **never commit it
+   to this repo**, it's public on GitHub:
+   - Locally: `export PUBLIC_API_SECRET=...` before `streamlit run`, or put
+     `PUBLIC_API_SECRET = "..."` in `.streamlit/secrets.toml` (already
+     gitignored).
+   - On Streamlit Community Cloud: set it under the deployed app's
+     **Settings → Secrets** panel.
+3. Reading quotes/option data requires an `accountId` tied to your real
+   Public.com brokerage account — the app fetches it once (read-only) via
+   `GET /userapigateway/trading/account`. No order/trading endpoint is ever
+   called.
 
 > **Note on this build:** the sandbox this was built in has no access to
-> PyPI beyond a small preinstalled set (pandas/numpy were present;
-> `streamlit`, `yfinance`, `matplotlib`'s heavier cousins like `plotly`,
-> and even `pytest` could not be installed or reached over the network).
-> Concretely, that means: the engine (`engine/`) and the sample-data
-> pipeline are fully tested and verified end-to-end, including rendering
-> real chart images from the backtest output. `app/app.py`'s Streamlit
-> wiring itself could not be executed here — it's straightforward,
-> standard Streamlit code built on top of the tested `engine`/`app.charts`/
-> `app.data_provider` modules, but you should give it a first run on your
-> own machine to confirm the UI behaves as expected.
+> PyPI beyond a small preinstalled set (pandas/numpy/`requests` were
+> present; `streamlit` and `matplotlib`'s heavier cousins like `plotly`
+> could not be installed or reached over the network). Concretely, that
+> means: the engine (`engine/`) and the sample-data pipeline are fully
+> tested and verified end-to-end, including rendering real chart images
+> from the backtest output, and `app/public_client.py`'s HTTP logic is
+> covered by mocked unit tests (`tests/test_public_client.py`). Neither
+> `app/app.py`'s Streamlit wiring nor a real call to the Public.com API
+> could be executed here — the sandbox's own network policy blocks
+> `api.public.com` outright — so give both a first run on your own machine
+> (or watch the Streamlit Community Cloud deploy) to confirm real data
+> flows end-to-end.
 
 ---
 
@@ -149,7 +171,7 @@ straight bull run, a bear market, a flat/no-trend name, and one with a
 fresh Golden Cross in the final days). The tickers are fictional company
 names on purpose, so nobody mistakes this for real historical prices of an
 actual stock. It exists purely so the app works with zero setup; switch to
-"Live (yfinance)" for real data.
+"Live (Public.com)" for real data.
 
 ---
 
@@ -196,7 +218,8 @@ engine/                  Pure strategy/backtest logic (no UI, no I/O deps)
 tests/test_engine.py     19 unit tests (stdlib unittest, hand-verified math)
 app/
   app.py                  Streamlit GUI (Scanner + Backtest tabs)
-  data_provider.py          Sample-data loader + yfinance fetcher
+  data_provider.py          Sample-data loader + Public.com bar fetcher
+  public_client.py            Public.com API client (auth, bars, live option chain)
   charts.py                  Matplotlib chart builders
 data/sample_prices/       Bundled synthetic CSVs (see disclaimer above)
 scripts/generate_sample_data.py   Regenerates the synthetic sample data
