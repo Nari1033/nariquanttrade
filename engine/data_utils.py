@@ -58,6 +58,16 @@ def to_dataframe(bars: PriceHistory) -> pd.DataFrame:
         raise ValueError(f"Price history is missing required columns: {missing}")
 
     df = df[REQUIRED_COLUMNS].astype(float)
+    # Drop bars with a missing OHLC price -- most commonly a live source's
+    # (e.g. yfinance) row for the most recent/in-progress session, returned
+    # with NaN open/high/low/close before that day's trading has produced a
+    # real price. Left in, a single NaN close propagates through every
+    # downstream calculation that touches it (equity curve, SMAs, returns),
+    # silently turning a whole backtest's results into "nan%" instead of a
+    # real number. Volume alone being missing isn't reason to drop a bar
+    # (some sources omit it for otherwise-valid days), so it's just zeroed.
+    df = df.dropna(subset=["open", "high", "low", "close"])
+    df["volume"] = df["volume"].fillna(0.0)
     df = df.sort_index()
     df = df[~df.index.duplicated(keep="last")]
     return df

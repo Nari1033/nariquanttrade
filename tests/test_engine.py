@@ -71,6 +71,36 @@ class TestDataUtils(unittest.TestCase):
         with self.assertRaises(ValueError):
             to_dataframe([{"date": "2024-01-01", "open": 1, "high": 1, "low": 1}])  # no close/volume
 
+    def test_to_dataframe_drops_bars_with_missing_ohlc(self):
+        # Mirrors a live source (e.g. yfinance) returning a NaN row for the
+        # most recent/in-progress session -- that bar should be dropped
+        # rather than silently propagating NaN into every downstream
+        # calculation (see the "nan%" bug this guards against).
+        import math
+
+        dicts = [
+            {"date": "2024-01-01", "open": 10, "high": 10, "low": 10, "close": 10, "volume": 1000},
+            {"date": "2024-01-02", "open": 11, "high": 11, "low": 11, "close": 11, "volume": 1000},
+            # Today's still-forming bar, as yfinance sometimes reports it.
+            {"date": "2024-01-03", "open": math.nan, "high": math.nan, "low": math.nan, "close": math.nan, "volume": 0},
+        ]
+        df = to_dataframe(dicts)
+        self.assertEqual(len(df), 2)
+        self.assertEqual(list(df["close"]), [10, 11])
+        self.assertFalse(df["close"].isna().any())
+
+    def test_to_dataframe_keeps_bar_with_only_missing_volume(self):
+        import math
+
+        dicts = [
+            {"date": "2024-01-01", "open": 10, "high": 10, "low": 10, "close": 10, "volume": 1000},
+            {"date": "2024-01-02", "open": 11, "high": 11, "low": 11, "close": 11.5, "volume": math.nan},
+        ]
+        df = to_dataframe(dicts)
+        self.assertEqual(len(df), 2)
+        self.assertEqual(df["volume"].iloc[1], 0.0)
+        self.assertAlmostEqual(df["close"].iloc[1], 11.5)
+
 
 class TestSMA(unittest.TestCase):
     def test_sma_matches_manual_rolling_average(self):
