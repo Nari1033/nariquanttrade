@@ -41,6 +41,13 @@ from app.data_provider import (
     range_key as data_range_key,
 )
 from app.strategies import STRATEGIES, NumberParam, Strategy, default_grid_selection
+from app.news_provider import (
+    NEWS_TOPICS,
+    NewsFetchError,
+    SENTIMENT_ORDER,
+    fetch_trending_news,
+    sentiment_distribution,
+)
 from engine.analysis import analyze_underperformance
 from engine.backtester import annualized_return_pct
 from engine.indicators import add_sma_columns
@@ -148,7 +155,7 @@ with st.expander("👋 New here? Here's what QuantTrade does", expanded=True):
     )
     st.markdown("")
 
-    thumb_cols = st.columns(4)
+    thumb_cols = st.columns(5)
     thumbnails = [
         (
             "🔍",
@@ -177,6 +184,13 @@ with st.expander("👋 New here? Here's what QuantTrade does", expanded=True):
             "Grid-search a strategy's parameters across four market windows "
             "(2020-22, 2022-24, 2024-26, and the full span) to find combos that "
             "beat buy & hold consistently, not just once.",
+        ),
+        (
+            "📰",
+            "Trending News",
+            "Live market news and sentiment via Alpha Vantage -- filter by ticker "
+            "or topic, see each headline's sentiment score, and jump straight to "
+            "the source.",
         ),
     ]
     for col, (icon, title, desc) in zip(thumb_cols, thumbnails):
@@ -840,6 +854,182 @@ def render_sweep_panel() -> None:
     )
 
 
+
+# ---------------------------------------------------------------------------
+# Trending News panel -- live market news + sentiment via Alpha Vantage's
+# NEWS_SENTIMENT API (app/news_provider.py does the fetch/parse; this just
+# renders it). Free-tier Alpha Vantage keys are capped at 25 requests/day,
+# so the actual HTTP call is wrapped in st.cache_data with a 15-minute TTL
+# and only runs when a button below is pressed -- never on every rerun.
+# ---------------------------------------------------------------------------
+
+_TOPIC_LABEL_TO_SLUG = {slug.replace("_", " ").title(): slug for slug in NEWS_TOPICS}
+
+_SENTIMENT_DOT = {
+    "Bearish": "\U0001F534",
+    "Somewhat-Bearish": "\U0001F7E0",
+    "Neutral": "\u26AA",
+    "Somewhat-Bullish": "\U0001F7E2",
+    "Bullish": "\U0001F7E2",
+}
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _cached_fetch_news(api_key: str, tickers: str, topics: str, sort: str, limit: int):
+    """Thin cache boundary around news_provider.fetch_trending_news -- kept
+    as a one-line wrapper (rather than decorating fetch_trending_news
+    itself) so that module stays Streamlit-free and independently
+    unit-testable (see tests/test_news_provider.py). Returns (items,
+    fetched_at) rather than just items so the UI can show when this batch
+    was actually pulled -- fetched_at is computed here, inside the cached
+    function, so a cache HIT (same filters, within 15 min) keeps showing
+    the original fetch time instead of the current time."""
+    items = fetch_trending_news(
+        api_key, tickers=tickers or None, topics=topics or None, sort=sort, limit=limit
+    )
+    return items, dt.datetime.now()
+
+
+def render_news_panel() -> None:
+    st.caption(
+        "Latest market news from Alpha Vantage's `NEWS_SENTIMENT` API, optionally "
+        "filtered by ticker or topic. Each headline is scored -1 (most negative) to "
+        "+1 (most positive): \u2264-0.35 Bearish, -0.35 to -0.15 Somewhat-Bearish, "
+        "-0.15 to 0.15 Neutral, 0.15 to 0.35 Somewhat-Bullish, \u22650.35 Bullish."
+    )
+
+    secrets_key = ""
+    try:
+        secrets_key = st.secrets.get("ALPHAVANTAGE_API_KEY", "")
+    except Exception:
+        secrets_key = ""
+
+    api_key = st.sidebar.text_input(
+        "Alpha Vantage API key",
+        value=secrets_key,
+        type="password",
+        help=(
+            "Free key at alphavantage.co/support/#api-key. Free-tier keys are capped "
+            "at 25 requests/day, so news results here are cached for 15 minutes."
+        ),
+        key="news_api_key",
+    )
+    if not secrets_key:
+        st.sidebar.caption(
+            "\U0001F4A1 To avoid re-entering this every time: add it to "
+            "`.streamlit/secrets.toml` locally, or under this app's Settings -> "
+            "Secrets on Streamlit Cloud, as `ALPHAVANTAGE_API_KEY = \"...\"`."
+        )
+
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        tickers_input = st.text_input(
+            "Tickers (optional, comma-separated)",
+            value="",
+            placeholder="e.g. AAPL,TSLA",
+            key="news_tickers",
+        )
+    with col2:
+        topic_label = st.selectbox(
+            "Topic (optional)",
+            ["All"] + list(_TOPIC_LABEL_TO_SLUG.keys()),
+            key="news_topic",
+        )
+        topic = _TOPIC_LABEL_TO_SLUG.get(topic_label, "")
+    with col3:
+        sort_label = st.selectbox("Sort", ["Latest", "Relevance"], key="news_sort")
+        sort = "LATEST" if sort_label == "Latest" else "RELEVANCE"
+    with col4:
+        limit = st.number_input(
+            "Max headlines", min_value=5, max_value=200, value=20, step=5, key="news_limit"
+        )
+
+    fetch_col, refresh_col = st.columns([1, 1])
+    with fetch_col:
+        fetch = st.button("Fetch trending news", type="primary", key="news_fetch")
+    with refresh_col:
+        refresh = st.button(
+            "\U0001F504 Refresh",
+            key="news_refresh",
+            help=(
+                "Skip the 15-minute cache and pull the latest headlines from Alpha "
+                "Vantage right now, for whatever filters are set above."
+            ),
+        )
+    if not (fetch or refresh):
+        return
+
+    if not api_key:
+        st.error(
+            "Enter an Alpha Vantage API key above (or set ALPHAVANTAGE_API_KEY in "
+            "secrets) to fetch news."
+        )
+        return
+
+    if refresh:
+        # Drop every cached entry for this function (not just the current
+        # filter combo) so Refresh always means "go live now", regardless
+        # of which filters were used on the last fetch.
+        _cached_fetch_news.clear()
+
+    with st.spinner("Fetching news..."):
+        try:
+            items, fetched_at = _cached_fetch_news(
+                api_key, tickers_input.strip().upper(), topic, sort, int(limit)
+            )
+        except NewsFetchError as exc:
+            st.error(f"Couldn't fetch news: {exc.message}")
+            return
+
+    if not items:
+        st.info("No headlines returned for these filters.")
+        return
+
+    st.caption(
+        f"{len(items)} headline(s) \u00b7 as of {fetched_at.strftime('%H:%M:%S')} "
+        "(auto-refreshes after 15 min, or press Refresh for a live pull now)"
+    )
+
+    counts = sentiment_distribution(items)
+    dist_df = pd.DataFrame(
+        {"Sentiment": SENTIMENT_ORDER, "Headlines": [counts[s] for s in SENTIMENT_ORDER]}
+    ).set_index("Sentiment")
+    st.bar_chart(dist_df)
+
+    for item in items:
+        primary = item.primary_ticker
+        with st.container(border=True):
+            st.markdown(f"**[{item.title}]({item.url})**")
+            meta_cols = st.columns([2, 2, 3, 3])
+            meta_cols[0].caption(f"\U0001F553 {item.time_published.strftime('%b %d, %H:%M')} ET")
+            meta_cols[1].caption(f"\U0001F4F0 {item.source}")
+            dot = _SENTIMENT_DOT.get(item.overall_sentiment_label, "\u26AA")
+            meta_cols[2].caption(
+                f"{dot} {item.overall_sentiment_label} ({item.overall_sentiment_score:+.2f})"
+            )
+            if primary:
+                p_dot = _SENTIMENT_DOT.get(primary.sentiment_label, "\u26AA")
+                meta_cols[3].caption(
+                    f"\U0001F3AF {primary.ticker}: {p_dot} {primary.sentiment_label} "
+                    f"({primary.sentiment_score:+.2f})"
+                )
+            if item.summary:
+                st.caption(item.summary)
+            other_tickers = [t for t in item.tickers if primary is None or t.ticker != primary.ticker]
+            if other_tickers:
+                other = ", ".join(f"{t.ticker} ({t.sentiment_score:+.2f})" for t in other_tickers)
+                st.caption(f"Also mentions: {other}")
+
+    st.markdown("---")
+    st.markdown("**Useful links**")
+    st.markdown(
+        "- [Alpha Vantage NEWS_SENTIMENT documentation]"
+        "(https://www.alphavantage.co/documentation/#news-sentiment)\n"
+        "- [Alpha Vantage full API documentation](https://www.alphavantage.co/documentation/)\n"
+        "- [Get a free Alpha Vantage API key](https://www.alphavantage.co/support/#api-key)"
+    )
+
+
 # ---------------------------------------------------------------------------
 # One top-level tab layout:
 #   - "🔍 Scanner" -- a single page. Pick which strategy to scan with from
@@ -850,11 +1040,17 @@ def render_sweep_panel() -> None:
 #   - One "📈 <strategy label>" tab per strategy for its backtest, so every
 #     strategy's backtest results live on their own page instead of being
 #     nested under a strategy-specific outer tab.
+#   - "🧪 Parameter Sweep" and "📰 Trending News" always sit last, in that
+#     order, after every per-strategy tab.
 # Add a new Strategy to app/strategies.py and it shows up in both places
 # automatically -- no other app.py changes needed.
 # ---------------------------------------------------------------------------
 
-main_tab_labels = ["🔍 Scanner"] + [f"📈 {s.label}" for s in STRATEGIES] + ["🧪 Parameter Sweep"]
+main_tab_labels = (
+    ["🔍 Scanner"]
+    + [f"📈 {s.label}" for s in STRATEGIES]
+    + ["🧪 Parameter Sweep", "📰 Trending News"]
+)
 main_tabs = st.tabs(main_tab_labels)
 
 with main_tabs[0]:
@@ -868,9 +1064,12 @@ with main_tabs[0]:
     scanner_strategy = strategy_by_label[chosen_label]
     render_scanner_panel(scanner_strategy, key_prefix=scanner_strategy.id)
 
-for strategy, backtest_tab in zip(STRATEGIES, main_tabs[1:-1]):
+for strategy, backtest_tab in zip(STRATEGIES, main_tabs[1:-2]):
     with backtest_tab:
         render_backtest_panel(strategy, key_prefix=strategy.id)
 
-with main_tabs[-1]:
+with main_tabs[-2]:
     render_sweep_panel()
+
+with main_tabs[-1]:
+    render_news_panel()

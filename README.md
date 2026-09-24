@@ -138,6 +138,18 @@ crossover days and P/L can be computed by hand and checked exactly).
   SMA windows, and starting capital; get back the strategy return, buy &
   hold return, trade count, win rate, a price+SMA+signals chart, an equity
   curve (strategy vs. buy & hold), and a trade log.
+- **Trending News tab** — live market news + sentiment from Alpha
+  Vantage's `NEWS_SENTIMENT` API (`app/news_provider.py`), optionally
+  filtered by ticker or topic: each headline shows its source, an overall
+  sentiment score/label, the sentiment for whichever ticker it's most
+  about, a summary, and a link to the source article. A Refresh button
+  bypasses the cache for a live pull. Requires a free Alpha Vantage API
+  key (25 requests/day on the free tier -- results are cached for 15
+  minutes to stay well under that). Set it either in
+  `.streamlit/secrets.toml` as `ALPHAVANTAGE_API_KEY = "..."` (gitignored,
+  local only) or paste it into the sidebar field at runtime; for the
+  deployed app, add the same key under Streamlit Cloud's app Settings ->
+  Secrets (separate from both the repo and your local secrets file).
 
 ### Sample data disclaimer
 
