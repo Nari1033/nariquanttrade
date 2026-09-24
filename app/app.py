@@ -46,7 +46,9 @@ from app.news_provider import (
     NewsFetchError,
     SENTIMENT_ORDER,
     fetch_trending_news,
+    matched_catalysts,
     sentiment_distribution,
+    top_movers,
 )
 from engine.analysis import analyze_underperformance
 from engine.backtester import annualized_return_pct
@@ -985,14 +987,24 @@ def render_news_panel() -> None:
         st.info("No headlines returned for these filters.")
         return
 
-    # Displayed most-bullish to most-bearish by overall_sentiment_score --
-    # independent of the "Sort" control above, which only affects which
-    # headlines Alpha Vantage returns (latest vs. most relevant), not the
-    # order they're shown in here.
-    items = sorted(items, key=lambda i: i.overall_sentiment_score, reverse=True)
+    # Pin up to 5 "potential movers" (FDA approvals, M&A, guidance cuts,
+    # etc. -- see news_provider.impact_score) at the top, with near-dupe
+    # coverage of the same story collapsed to one copy; everything else
+    # follows, sorted most-bullish to most-bearish by overall_sentiment_score
+    # (independent of the "Sort" control above, which only affects which
+    # headlines Alpha Vantage returns in the first place).
+    movers = top_movers(items, n=5)
+    mover_ids = {id(m) for m in movers}
+    rest = sorted(
+        (i for i in items if id(i) not in mover_ids),
+        key=lambda i: i.overall_sentiment_score,
+        reverse=True,
+    )
+    items = movers + rest
 
     st.caption(
-        f"{len(items)} headline(s), sorted bullish \u2192 bearish \u00b7 as of "
+        f"{len(items)} headline(s) \u00b7 top {len(movers)} potential mover(s) pinned "
+        f"first \u00b7 rest sorted bullish \u2192 bearish \u00b7 as of "
         f"{fetched_at.strftime('%H:%M:%S')} (auto-refreshes after 15 min, or press "
         "Refresh for a live pull now)"
     )
@@ -1006,6 +1018,10 @@ def render_news_panel() -> None:
     for item in items:
         primary = item.primary_ticker
         with st.container(border=True):
+            if id(item) in mover_ids:
+                hits = matched_catalysts(item)
+                why = f" -- matched: {', '.join(hits)}" if hits else ""
+                st.markdown(f"\U0001F680 **Potential mover**{why}")
             st.markdown(f"**[{item.title}]({item.url})**")
             meta_cols = st.columns([2, 2, 3, 3])
             meta_cols[0].caption(f"\U0001F553 {item.time_published.strftime('%b %d, %H:%M')} ET")

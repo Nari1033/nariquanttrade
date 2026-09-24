@@ -18,6 +18,7 @@ silently let a rate-limited response through as "success" with no feed.
 from __future__ import annotations
 
 import datetime as dt
+import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -188,3 +189,140 @@ def sentiment_distribution(items: List[NewsItem]) -> Dict[str, int]:
     for item in items:
         counts[item.overall_sentiment_label] = counts.get(item.overall_sentiment_label, 0) + 1
     return counts
+
+
+# ---------------------------------------------------------------------------
+# "Top movers" -- a heuristic guess at which fetched headlines are most
+# likely to move their primary ticker's price meaningfully (an FDA approval,
+# an acquisition, a guidance cut -- not a routine insider Form 4 sale or a
+# same-direction-as-the-market dip). This is NOT a prediction of direction,
+# just "worth a second look" -- a plain keyword/relevance heuristic, not a
+# model, so it will miss things and occasionally flag something mundane.
+# ---------------------------------------------------------------------------
+
+# Catalyst-style phrases, weighted by how decisively they tend to move a
+# stock on their own. Matched case-insensitively as substrings of
+# "title summary", so e.g. "phase 3" also catches "Phase 3 trial".
+CATALYST_KEYWORDS: Dict[str, float] = {
+    # Regulatory / clinical (biotech & pharma catalysts are often the
+    # single biggest single-day movers of any sector)
+    "fda approv": 3.0,
+    "fda reject": 3.0,
+    "fda declin": 2.5,
+    "complete response letter": 3.0,
+    "clinical hold": 2.5,
+    "phase 3": 2.5,
+    "phase iii": 2.5,
+    "phase 2": 2.0,
+    "phase ii": 2.0,
+    "clinical trial": 1.5,
+    "trial success": 3.0,
+    "trial met": 2.5,
+    "trial fail": 3.0,
+    "primary endpoint": 2.5,
+    "breakthrough therapy": 2.0,
+    "recall": 2.0,
+    # Corporate actions
+    "to be acquired": 3.0,
+    "acquisition": 2.0,
+    "acquire": 1.5,
+    "merger": 2.0,
+    "buyout": 2.5,
+    "takeover": 2.5,
+    "tender offer": 2.0,
+    "bankruptcy": 3.0,
+    "chapter 11": 3.0,
+    "delisting": 2.5,
+    "spinoff": 1.5,
+    "spin-off": 1.5,
+    # Earnings / guidance surprises
+    "guidance cut": 2.5,
+    "cuts guidance": 2.5,
+    "raises guidance": 2.0,
+    "profit warning": 2.5,
+    "beats estimates": 1.0,
+    "misses estimates": 1.0,
+    # Legal / regulatory trouble
+    "sec investigation": 2.5,
+    "fraud": 2.0,
+    "indictment": 2.5,
+    "class action": 1.0,
+    "data breach": 2.0,
+    # Leadership shakeups
+    "ceo resigns": 2.0,
+    "ceo steps down": 2.0,
+    "ceo fired": 2.5,
+    # Deals
+    "licensing deal": 1.5,
+    "contract win": 1.5,
+    "partnership": 0.5,
+}
+
+# Words too common to mean anything for duplicate-detection.
+_TITLE_STOPWORDS = {
+    "a", "an", "the", "to", "of", "in", "on", "for", "and", "or", "is",
+    "are", "its", "after", "before", "stock", "shares", "inc", "corp",
+    "co", "ltd", "at", "with", "into", "as",
+}
+
+
+def matched_catalysts(item: NewsItem) -> List[str]:
+    """Which CATALYST_KEYWORDS phrases appear in this item's title or
+    summary -- exposed (not just used internally by impact_score) so the
+    UI can show *why* something was flagged as a potential mover."""
+    text = f"{item.title} {item.summary}".lower()
+    return [kw for kw in CATALYST_KEYWORDS if kw in text]
+
+
+def impact_score(item: NewsItem) -> float:
+    """Heuristic score for how likely this headline is to move its primary
+    ticker's price meaningfully. Combines three signals: catalyst-keyword
+    hits (weighted by keyword), how extreme the sentiment is in EITHER
+    direction (a strong bearish surprise is just as price-moving as a
+    strong bullish one), and how squarely the article is about one
+    specific ticker (relevance_score) -- a roundup piece that mentions ten
+    names in passing shouldn't outrank a story that's entirely about one."""
+    keyword_score = sum(CATALYST_KEYWORDS[kw] for kw in matched_catalysts(item))
+    sentiment_score = abs(item.overall_sentiment_score) * 2.0
+    primary = item.primary_ticker
+    relevance_score = (primary.relevance_score if primary else 0.0) * 1.5
+    return keyword_score + sentiment_score + relevance_score
+
+
+def _title_tokens(title: str) -> set:
+    words = re.findall(r"[a-z0-9]+", title.lower())
+    return {w for w in words if w not in _TITLE_STOPWORDS and len(w) > 2}
+
+
+def _are_near_duplicates(a: NewsItem, b: NewsItem) -> bool:
+    """True if `a` and `b` look like separate outlets covering the exact
+    same story -- same primary ticker AND enough title-word overlap
+    (Jaccard similarity >= 0.5) that they're very unlikely to be two
+    different stories about the same company."""
+    a_primary = a.primary_ticker.ticker if a.primary_ticker else None
+    b_primary = b.primary_ticker.ticker if b.primary_ticker else None
+    if a_primary is None or a_primary != b_primary:
+        return False
+    ta, tb = _title_tokens(a.title), _title_tokens(b.title)
+    if not ta or not tb:
+        return False
+    jaccard = len(ta & tb) / len(ta | tb)
+    return jaccard >= 0.5
+
+
+def top_movers(items: List[NewsItem], n: int = 5) -> List[NewsItem]:
+    """The `n` headlines most likely to move their primary ticker
+    meaningfully, ranked by impact_score (highest first), with
+    near-duplicate coverage of the same underlying story collapsed to just
+    the single highest-scoring copy -- so the result never shows the same
+    event twice even if several outlets ran near-identical headlines on
+    it."""
+    ranked = sorted(items, key=impact_score, reverse=True)
+    selected: List[NewsItem] = []
+    for candidate in ranked:
+        if any(_are_near_duplicates(candidate, kept) for kept in selected):
+            continue
+        selected.append(candidate)
+        if len(selected) >= n:
+            break
+    return selected

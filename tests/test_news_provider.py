@@ -122,3 +122,113 @@ class TestSentimentDistribution(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _item(
+    title="Some routine headline",
+    summary="",
+    overall_sentiment_score=0.0,
+    ticker="ABC",
+    relevance=1.0,
+):
+    """Small builder for hand-crafted NewsItem fixtures below -- avoids
+    repeating every field for each test case."""
+    from app.news_provider import NewsItem, TickerSentiment
+
+    return NewsItem(
+        title=title,
+        url=f"https://example.com/{hash(title) & 0xffffff}",
+        source="Test Wire",
+        time_published=dt.datetime(2026, 9, 24, 12, 0, 0),
+        summary=summary,
+        overall_sentiment_score=overall_sentiment_score,
+        overall_sentiment_label="Neutral",
+        tickers=[
+            TickerSentiment(
+                ticker=ticker,
+                relevance_score=relevance,
+                sentiment_score=overall_sentiment_score,
+                sentiment_label="Neutral",
+            )
+        ]
+        if ticker
+        else [],
+    )
+
+
+class TestImpactScore(unittest.TestCase):
+    def test_catalyst_keyword_raises_score(self):
+        from app.news_provider import impact_score
+
+        plain = _item(title="XYZ Corp stock dips slightly")
+        catalyst = _item(title="XYZ Corp wins FDA approval for new drug")
+        self.assertGreater(impact_score(catalyst), impact_score(plain))
+
+    def test_extreme_sentiment_raises_score_either_direction(self):
+        from app.news_provider import impact_score
+
+        neutral = _item(overall_sentiment_score=0.0)
+        very_bullish = _item(overall_sentiment_score=0.9)
+        very_bearish = _item(overall_sentiment_score=-0.9)
+        self.assertGreater(impact_score(very_bullish), impact_score(neutral))
+        self.assertGreater(impact_score(very_bearish), impact_score(neutral))
+        # A strong bearish surprise is exactly as "worth a look" as an
+        # equally strong bullish one -- score should be symmetric.
+        self.assertAlmostEqual(impact_score(very_bullish), impact_score(very_bearish))
+
+    def test_low_relevance_lowers_score(self):
+        from app.news_provider import impact_score
+
+        squarely_about_it = _item(relevance=1.0)
+        mentioned_in_passing = _item(relevance=0.1)
+        self.assertGreater(impact_score(squarely_about_it), impact_score(mentioned_in_passing))
+
+    def test_matched_catalysts_lists_hits(self):
+        from app.news_provider import matched_catalysts
+
+        item = _item(title="Company announces bankruptcy filing", summary="Chapter 11 planned")
+        hits = matched_catalysts(item)
+        self.assertIn("bankruptcy", hits)
+        self.assertIn("chapter 11", hits)
+        self.assertNotIn("fda approv", hits)
+
+
+class TestTopMovers(unittest.TestCase):
+    def test_ranks_by_impact_score_descending(self):
+        from app.news_provider import top_movers
+
+        low = _item(title="Routine update", ticker="AAA")
+        high = _item(title="AAA wins FDA approval for flagship drug", ticker="AAA", overall_sentiment_score=0.6)
+        result = top_movers([low, high], n=5)
+        self.assertEqual(result[0], high)
+
+    def test_caps_at_n(self):
+        from app.news_provider import top_movers
+
+        items = [_item(title=f"Ticker{i} wins FDA approval", ticker=f"T{i}") for i in range(10)]
+        self.assertEqual(len(top_movers(items, n=5)), 5)
+
+    def test_near_duplicate_same_ticker_collapsed_to_one(self):
+        from app.news_provider import top_movers
+
+        a = _item(title="Acme Corp wins FDA approval for new drug", ticker="ACME", overall_sentiment_score=0.5)
+        b = _item(title="Acme Corp wins FDA approval for its new drug", ticker="ACME", overall_sentiment_score=0.4)
+        filler = [_item(title=f"Other{i} routine update", ticker=f"O{i}") for i in range(5)]
+        result = top_movers([a, b] + filler, n=5)
+        acme_titles = [i for i in result if i.tickers and i.tickers[0].ticker == "ACME"]
+        self.assertEqual(len(acme_titles), 1)
+        # The higher-scoring (more bullish) of the pair is the one kept.
+        self.assertEqual(acme_titles[0], a)
+
+    def test_same_headline_different_ticker_not_deduped(self):
+        from app.news_provider import top_movers
+
+        a = _item(title="Company wins FDA approval for new drug", ticker="AAA", overall_sentiment_score=0.5)
+        b = _item(title="Company wins FDA approval for new drug", ticker="BBB", overall_sentiment_score=0.5)
+        result = top_movers([a, b], n=5)
+        self.assertEqual(len(result), 2)
+
+    def test_empty_input(self):
+        from app.news_provider import top_movers
+
+        self.assertEqual(top_movers([], n=5), [])
