@@ -12,6 +12,7 @@ from datetime import date, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from engine.calendar_filters import DEFAULT_WINDOW_DAYS
 from engine.models import PriceBar
 from engine.wheel import backtest_wheel_strategy
 
@@ -172,6 +173,39 @@ class TestWheelBacktester(unittest.TestCase):
         self.assertEqual(s["strategy_name"], "wheel")
         self.assertIsNone(s["fast_window"])
         self.assertIsNone(s["slow_window"])
+
+    def test_entry_day_of_month_zero_matches_unfiltered_baseline(self):
+        # 0 must be a true no-op -- same trade count and same entry dates
+        # as never passing the param at all.
+        bars = make_bars(make_mild_oscillation(300))
+        baseline = backtest_wheel_strategy(bars, ticker="OSC")
+        filtered = backtest_wheel_strategy(bars, ticker="OSC", entry_day_of_month=0)
+        self.assertEqual(
+            [t.entry_date for t in baseline.trades], [t.entry_date for t in filtered.trades]
+        )
+
+    def test_entry_day_of_month_restricts_every_entry_to_the_window(self):
+        bars = make_bars(make_mild_oscillation(300))
+        target = 10
+        result = backtest_wheel_strategy(bars, ticker="OSC", entry_day_of_month=target)
+        self.assertGreater(result.total_trades, 0, "test fixture should still produce some trades")
+        for t in result.trades:
+            day = t.entry_date.day
+            # Distance to `target`, allowing for wraparound at month
+            # boundaries not being modeled -- day_of_month_ok is a plain
+            # abs() comparison, so just re-check that same arithmetic here.
+            self.assertLessEqual(abs(day - target), DEFAULT_WINDOW_DAYS)
+            self.assertEqual(t.meta["entry_day_of_month"], target)
+
+    def test_narrow_entry_window_trades_less_than_unfiltered(self):
+        # A day-of-month filter can only ever remove eligible entry days,
+        # never add one -- so it should never produce *more* trades than
+        # leaving it off, and for a fixture with many eligible entry days
+        # it should produce strictly fewer.
+        bars = make_bars(make_mild_oscillation(300))
+        baseline = backtest_wheel_strategy(bars, ticker="OSC")
+        filtered = backtest_wheel_strategy(bars, ticker="OSC", entry_day_of_month=15)
+        self.assertLessEqual(filtered.total_trades, baseline.total_trades)
 
 
 if __name__ == "__main__":

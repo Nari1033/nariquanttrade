@@ -54,6 +54,7 @@ from typing import List, Optional
 import pandas as pd
 
 from .backtester import BacktestResult, Trade
+from .calendar_filters import day_of_month_ok
 from .data_utils import to_dataframe
 from .indicators import add_sma_columns
 from .models import PriceHistory
@@ -69,6 +70,7 @@ def backtest_cash_secured_put(
     profit_target_pct: float = 50.0,
     stop_loss_pct: float = 200.0,
     trend_sma_window: int = 200,
+    entry_day_of_month: int = 0,
     vol_window: int = 20,
     risk_free_rate_pct: float = 4.5,
     initial_capital: float = 10_000.0,
@@ -144,6 +146,7 @@ def backtest_cash_secured_put(
                             "exit_reason": exit_reason,
                             "short_strike": round(position["strike"], 2),
                             "dte_entry": dte_entry,
+                            "entry_day_of_month": entry_day_of_month,
                         },
                     )
                 )
@@ -151,7 +154,9 @@ def backtest_cash_secured_put(
 
         # --- consider opening a new position (not on the final bar -- no
         # time left to manage it) ---
-        if position is None and i != last_i and trend_ok and pd.notna(sigma) and sigma > 0:
+        calendar_ok = day_of_month_ok(dt, entry_day_of_month)
+        entry_ok = position is None and i != last_i and trend_ok and calendar_ok
+        if entry_ok and pd.notna(sigma) and sigma > 0:
             T_entry = dte_entry / 365.0
             try:
                 strike = strike_for_put_delta_magnitude(close, short_delta, T_entry, r, sigma)

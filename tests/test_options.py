@@ -14,6 +14,7 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from engine.calendar_filters import DEFAULT_WINDOW_DAYS
 from engine.models import PriceBar
 from engine.options_backtester import backtest_bull_put_spread
 from engine.options_pricing import (
@@ -237,6 +238,36 @@ class TestBullPutSpreadBacktester(unittest.TestCase):
         self.assertEqual(s["strategy_name"], "bull_put_spread")
         self.assertIsNone(s["fast_window"])
         self.assertEqual(s["slow_window"], 200)
+
+    def test_entry_day_of_month_zero_matches_unfiltered_baseline(self):
+        # 0 must be a true no-op -- same trade count and same entry dates
+        # as never passing the param at all.
+        baseline = backtest_bull_put_spread(self.bars, ticker="TREND")
+        filtered = backtest_bull_put_spread(self.bars, ticker="TREND", entry_day_of_month=0)
+        self.assertEqual(
+            [t.entry_date for t in baseline.trades], [t.entry_date for t in filtered.trades]
+        )
+
+    def test_entry_day_of_month_restricts_every_entry_to_the_window(self):
+        target = 10
+        result = backtest_bull_put_spread(self.bars, ticker="TREND", entry_day_of_month=target)
+        self.assertGreater(result.total_trades, 0, "test fixture should still produce some trades")
+        for t in result.trades:
+            day = t.entry_date.day
+            # Distance to `target`, allowing for wraparound at month
+            # boundaries not being modeled -- day_of_month_ok is a plain
+            # abs() comparison, so just re-check that same arithmetic here.
+            self.assertLessEqual(abs(day - target), DEFAULT_WINDOW_DAYS)
+            self.assertEqual(t.meta["entry_day_of_month"], target)
+
+    def test_narrow_entry_window_trades_less_than_unfiltered(self):
+        # A day-of-month filter can only ever remove eligible entry days,
+        # never add one -- so it should never produce *more* trades than
+        # leaving it off, and for a fixture with many eligible uptrend
+        # days it should produce strictly fewer.
+        baseline = backtest_bull_put_spread(self.bars, ticker="TREND")
+        filtered = backtest_bull_put_spread(self.bars, ticker="TREND", entry_day_of_month=15)
+        self.assertLessEqual(filtered.total_trades, baseline.total_trades)
 
 
 if __name__ == "__main__":

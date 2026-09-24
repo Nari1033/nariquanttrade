@@ -73,6 +73,7 @@ from typing import List, Optional
 import pandas as pd
 
 from .backtester import BacktestResult, Trade
+from .calendar_filters import day_of_month_ok
 from .data_utils import to_dataframe
 from .models import PriceHistory
 from .options_pricing import (
@@ -90,6 +91,7 @@ def backtest_wheel_strategy(
     put_delta: float = 0.20,
     call_delta: float = 0.20,
     dte_days: int = 30,
+    entry_day_of_month: int = 0,
     vol_window: int = 20,
     risk_free_rate_pct: float = 4.5,
     initial_capital: float = 10_000.0,
@@ -164,6 +166,7 @@ def backtest_wheel_strategy(
                             "exit_reason": exit_reason,
                             "short_strike": round(strike, 2),
                             "leg": leg_type,
+                            "entry_day_of_month": entry_day_of_month,
                         },
                     )
                 )
@@ -182,8 +185,10 @@ def backtest_wheel_strategy(
                 # still reflects it; nothing was really settled.
 
         # --- consider opening a new leg (not on the final bar -- no time
-        # left to manage it) ---
-        if open_leg is None and i != last_i and have_vol:
+        # left to manage it). The wheel has no trend filter (see module
+        # docstring), so calendar_ok is the only entry-timing gate here.
+        calendar_ok = day_of_month_ok(dt, entry_day_of_month)
+        if open_leg is None and i != last_i and calendar_ok and have_vol:
             T_entry = dte_days / 365.0
             leg_type = "put" if shares_held == 0 else "call"
             try:

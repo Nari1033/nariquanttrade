@@ -222,6 +222,12 @@ STRATEGIES: List[Strategy] = [
                 is_sma_window=True,
                 help="Only enter new positions while price is above this SMA (trade only in an uptrend).",
             ),
+            NumberParam(
+                "entry_day_of_month", "Entry day of month (0 = any)", 0, 0, 28, step=1, is_int=True,
+                help=(
+                    'Only open a new position within 5 calendar days of this day of the month (e.g. 1 = near month-start, 15 = mid-month, 28 = month-end). 0 = no day-of-month filter -- enter whenever the other conditions are met, same as before this existed.'
+                ),
+            ),
         ],
         scan_fn=_bull_put_spread_scan,
         backtest_fn=backtest_bull_put_spread,
@@ -260,6 +266,12 @@ STRATEGIES: List[Strategy] = [
                 is_sma_window=True,
                 help="Only sell new puts while price is above this SMA (avoid selling into a downtrend).",
             ),
+            NumberParam(
+                "entry_day_of_month", "Entry day of month (0 = any)", 0, 0, 28, step=1, is_int=True,
+                help=(
+                    'Only open a new position within 5 calendar days of this day of the month (e.g. 1 = near month-start, 15 = mid-month, 28 = month-end). 0 = no day-of-month filter -- enter whenever the other conditions are met, same as before this existed.'
+                ),
+            ),
         ],
         scan_fn=_cash_secured_put_scan,
         backtest_fn=backtest_cash_secured_put,
@@ -289,6 +301,12 @@ STRATEGIES: List[Strategy] = [
             NumberParam(
                 "dte_days", "Days to expiration", 30, 5, 90, step=1, is_int=True,
                 help="Days to expiration at entry, for both the puts and the calls.",
+            ),
+            NumberParam(
+                "entry_day_of_month", "Entry day of month (0 = any)", 0, 0, 28, step=1, is_int=True,
+                help=(
+                    'Only open a new position within 5 calendar days of this day of the month (e.g. 1 = near month-start, 15 = mid-month, 28 = month-end). 0 = no day-of-month filter -- enter whenever the other conditions are met, same as before this existed.'
+                ),
             ),
         ],
         scan_fn=_wheel_scan,
