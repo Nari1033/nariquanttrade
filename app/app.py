@@ -985,9 +985,16 @@ def render_news_panel() -> None:
         st.info("No headlines returned for these filters.")
         return
 
+    # Displayed most-bullish to most-bearish by overall_sentiment_score --
+    # independent of the "Sort" control above, which only affects which
+    # headlines Alpha Vantage returns (latest vs. most relevant), not the
+    # order they're shown in here.
+    items = sorted(items, key=lambda i: i.overall_sentiment_score, reverse=True)
+
     st.caption(
-        f"{len(items)} headline(s) \u00b7 as of {fetched_at.strftime('%H:%M:%S')} "
-        "(auto-refreshes after 15 min, or press Refresh for a live pull now)"
+        f"{len(items)} headline(s), sorted bullish \u2192 bearish \u00b7 as of "
+        f"{fetched_at.strftime('%H:%M:%S')} (auto-refreshes after 15 min, or press "
+        "Refresh for a live pull now)"
     )
 
     counts = sentiment_distribution(items)
