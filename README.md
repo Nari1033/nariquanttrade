@@ -13,8 +13,11 @@ A small Python app with two pieces:
    timeframe, see strategy vs. buy & hold, trade log, equity curve).
 
 Data can come from the free `yfinance` package (real tickers, needs
-internet) or from bundled **synthetic** sample data (works instantly,
-offline, no API key — see the disclaimer below).
+internet), from bundled **synthetic** sample data (works instantly,
+offline, no API key — see the disclaimer below), or from a **pre-fetched
+offline dataset** of REAL historical prices for a broad market universe
+(S&P 500+400+600, filtered to a minimum market cap) — see "Offline
+dataset" below.
 
 ---
 
@@ -32,7 +35,9 @@ streamlit run app/app.py
 
 The GUI defaults to "Sample data (offline demo)" so it works immediately.
 Switch the sidebar to "Live (yfinance)" to scan/backtest real tickers once
-you have internet access.
+you have internet access, or to "Offline dataset" once you've built one
+via the Build Dataset tab (see below) — real historical prices with
+zero network calls at read time.
 
 > **Note on this build:** the sandbox this was built in has no access to
 > PyPI beyond a small preinstalled set (pandas/numpy were present;
@@ -151,6 +156,21 @@ crossover days and P/L can be computed by hand and checked exactly).
   deployed app, add the same key under Streamlit Cloud's app Settings ->
   Secrets (separate from both the repo and your local secrets file).
 
+- **Build Dataset tab** (`app/admin_fetch.py`) -- fetches the REAL
+  historical dataset used by the "Offline dataset" data source, server-
+  side, in small user-triggered batches (Yahoo Finance's free API rate-
+  limits aggressively, so this is deliberately not a single bulk call).
+  Default universe is a broad-market stand-in for "Russell 3000" (S&P
+  500+400+600, ~1,500 tickers, `data/tickers/broad_market.csv`) filtered
+  to a minimum market cap (checked cheaply via yfinance's `fast_info`
+  before spending time on a full history fetch); adjustable years of
+  history and batch size. Click "Fetch next batch" repeatedly (or return
+  later) to work through the universe. Because Streamlit Cloud's
+  filesystem is ephemeral, anything fetched is lost on the next
+  reboot/redeploy unless you download the "dataset so far" zip and commit
+  `data/historical_prices/` into the repo yourself -- that's what makes it
+  available to every future deploy, not just the running session.
+
 ### Sample data disclaimer
 
 `data/sample_prices/*.csv` (ACME, GLOBEX, INITECH, WAYNE, CYBERDYNE,
@@ -208,9 +228,12 @@ engine/                  Pure strategy/backtest logic (no UI, no I/O deps)
 tests/test_engine.py     19 unit tests (stdlib unittest, hand-verified math)
 app/
   app.py                  Streamlit GUI (Scanner + Backtest tabs)
-  data_provider.py          Sample-data loader + yfinance fetcher
+  data_provider.py          Sample/offline-data loaders + yfinance fetcher
+  admin_fetch.py             Build Dataset tab -- fetches the real offline dataset
   charts.py                  Matplotlib chart builders
 data/sample_prices/       Bundled synthetic CSVs (see disclaimer above)
+data/tickers/              Seed ticker universe(s) for the offline dataset fetch
+data/historical_prices/    REAL pre-fetched OHLCV (empty until you build it -- see above)
 scripts/generate_sample_data.py   Regenerates the synthetic sample data
 requirements.txt
 ```

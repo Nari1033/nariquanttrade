@@ -36,10 +36,14 @@ from app.charts import plot_equity_curves, plot_price_with_signals
 from app.data_provider import (
     fetch_yfinance_ticker,
     fetch_yfinance_universe,
+    list_offline_tickers,
     list_sample_tickers,
+    load_offline_ticker,
+    load_offline_universe,
     load_sample_ticker,
     range_key as data_range_key,
 )
+from app.admin_fetch import render_admin_fetch_panel
 from app.strategies import STRATEGIES, NumberParam, Strategy, default_grid_selection
 from app.news_provider import (
     NEWS_TOPICS,
@@ -88,17 +92,30 @@ DEFAULT_SWEEP_PERIODS = [
 # ---------------------------------------------------------------------------
 
 st.sidebar.title("Data source")
+_offline_count = len(list_offline_tickers())
 source_label = st.sidebar.radio(
     "Where should price data come from?",
-    ["Sample data (offline demo)", "Live (yfinance)"],
+    [
+        "Sample data (offline demo)",
+        f"Offline dataset ({_offline_count} tickers, cached)",
+        "Live (yfinance)",
+    ],
     index=0,
     help=(
         "Sample data is bundled synthetic price history so the app works "
-        "immediately with no setup. Switch to Live once you `pip install "
-        "yfinance` and have internet access, to scan/backtest real tickers."
+        "immediately with no setup. Offline dataset is REAL historical data "
+        "pre-fetched via the Build Dataset tab and committed to the repo -- "
+        "still zero network at read time, but real tickers instead of "
+        "fictional ones. Live fetches straight from yfinance every time "
+        "(subject to its cache), for anything not in the offline dataset."
     ),
 )
-source = "sample" if source_label.startswith("Sample") else "yfinance"
+if source_label.startswith("Sample"):
+    source = "sample"
+elif source_label.startswith("Offline"):
+    source = "offline"
+else:
+    source = "yfinance"
 
 if source == "sample":
     st.sidebar.caption(
@@ -108,6 +125,21 @@ if source == "sample":
         "Only daily bars exist on disk; Weekly/Monthly are resampled from "
         "them on the fly, and Hourly isn't available offline."
     )
+    cache_max_age_hours = 12.0
+    force_refresh = False
+elif source == "offline":
+    if _offline_count:
+        st.sidebar.caption(
+            f"✅ Real historical daily data for **{_offline_count} ticker(s)**, "
+            "pre-fetched via the 🗄️ Build Dataset tab. Zero network at read "
+            "time. Weekly/Monthly are resampled on the fly; Hourly isn't "
+            "available (daily bars only were fetched)."
+        )
+    else:
+        st.sidebar.warning(
+            "No offline data yet. Go to the 🗄️ Build Dataset tab to fetch some, "
+            "or switch source for now."
+        )
     cache_max_age_hours = 12.0
     force_refresh = False
 else:
@@ -316,6 +348,15 @@ def render_scanner_panel(strategy: Strategy, key_prefix: str) -> None:
         ticker_input = st.text_input(
             "Tickers to scan (comma-separated)", value=default_tickers, key=f"{key_prefix}_scan_tickers"
         )
+    elif source == "offline":
+        offline_tickers = list_offline_tickers()
+        default_tickers = ", ".join(offline_tickers[:10])
+        ticker_input = st.text_input(
+            "Tickers to scan (comma-separated)",
+            value=default_tickers,
+            key=f"{key_prefix}_scan_tickers",
+            help=f"{len(offline_tickers)} ticker(s) available offline -- showing the first 10 as a starting point.",
+        )
     else:
         ticker_input = st.text_input(
             "Tickers to scan (comma-separated)",
@@ -341,6 +382,11 @@ def render_scanner_panel(strategy: Strategy, key_prefix: str) -> None:
                         )
                     except ValueError:
                         missing.append(t)
+            elif source == "offline":
+                universe = load_offline_universe(
+                    tickers, start=scan_start, end=scan_end, interval=scan_interval
+                )
+                missing = [t for t in tickers if t not in universe]
             else:
                 universe = fetch_yfinance_universe(
                     tickers,
@@ -372,7 +418,9 @@ def render_scanner_panel(strategy: Strategy, key_prefix: str) -> None:
             last_close = df["close"].iloc[-1] if len(df) else None
             last_date = df.index[-1].date() if len(df) else None
             cache_age = (
-                cache.cache_age_hours(ticker, scan_key, scan_interval) if source == "yfinance" else None
+                cache.cache_age_hours(ticker, scan_key, scan_interval)
+                if source == "yfinance"
+                else None
             )
             rows.append(
                 {
@@ -402,6 +450,13 @@ def render_backtest_panel(strategy: Strategy, key_prefix: str) -> None:
     with row1c1:
         if source == "sample":
             bt_ticker = st.selectbox("Ticker", list_sample_tickers(), key=f"{key_prefix}_bt_ticker")
+        elif source == "offline":
+            offline_tickers = list_offline_tickers()
+            if offline_tickers:
+                bt_ticker = st.selectbox("Ticker", offline_tickers, key=f"{key_prefix}_bt_ticker")
+            else:
+                st.warning("No offline data yet -- see the 🗄️ Build Dataset tab.")
+                bt_ticker = None
         else:
             bt_ticker = st.text_input("Ticker", value="AAPL", key=f"{key_prefix}_bt_ticker").strip().upper()
     with row1c2:
@@ -442,8 +497,10 @@ def render_backtest_panel(strategy: Strategy, key_prefix: str) -> None:
     if bt_start >= bt_end:
         st.error("Start date must be before end date.")
         return
-    if source == "sample" and bt_interval == "1h":
-        st.error("Sample data is daily-only. Switch to Live (yfinance) for hourly bars.")
+    if bt_ticker is None:
+        return
+    if source in ("sample", "offline") and bt_interval == "1h":
+        st.error(f"{source_label} is daily-only. Switch to Live (yfinance) for hourly bars.")
         return
 
     # Fetch extra history before bt_start so the slowest SMA in this
@@ -457,6 +514,8 @@ def render_backtest_panel(strategy: Strategy, key_prefix: str) -> None:
         with st.spinner(f"Loading {bt_ticker} price history..."):
             if source == "sample":
                 df = load_sample_ticker(bt_ticker, start=fetch_start, end=bt_end, interval=bt_interval)
+            elif source == "offline":
+                df = load_offline_ticker(bt_ticker, start=fetch_start, end=bt_end, interval=bt_interval)
             else:
                 df = fetch_yfinance_ticker(
                     bt_ticker,
@@ -679,6 +738,13 @@ def render_sweep_panel() -> None:
     with col2:
         if source == "sample":
             sweep_ticker = st.selectbox("Ticker", list_sample_tickers(), key="sweep_ticker")
+        elif source == "offline":
+            offline_tickers = list_offline_tickers()
+            if offline_tickers:
+                sweep_ticker = st.selectbox("Ticker", offline_tickers, key="sweep_ticker")
+            else:
+                st.warning("No offline data yet -- see the 🗄️ Build Dataset tab.")
+                sweep_ticker = None
         else:
             sweep_ticker = st.text_input("Ticker", value="AAPL", key="sweep_ticker").strip().upper()
     with col3:
@@ -763,10 +829,15 @@ def render_sweep_panel() -> None:
     fetch_start = min(p.start for p in chosen_periods) - dt.timedelta(days=fetch_buffer_days)
     fetch_end = max(p.end for p in chosen_periods)
 
+    if sweep_ticker is None:
+        return
+
     try:
         with st.spinner(f"Loading {sweep_ticker} price history..."):
             if source == "sample":
                 df = load_sample_ticker(sweep_ticker, start=fetch_start, end=fetch_end, interval="1d")
+            elif source == "offline":
+                df = load_offline_ticker(sweep_ticker, start=fetch_start, end=fetch_end, interval="1d")
             else:
                 df = fetch_yfinance_ticker(
                     sweep_ticker,
@@ -1072,7 +1143,7 @@ def render_news_panel() -> None:
 main_tab_labels = (
     ["🔍 Scanner"]
     + [f"📈 {s.label}" for s in STRATEGIES]
-    + ["🧪 Parameter Sweep", "📰 Trending News"]
+    + ["🧪 Parameter Sweep", "📰 Trending News", "🗄️ Build Dataset"]
 )
 main_tabs = st.tabs(main_tab_labels)
 
@@ -1087,12 +1158,15 @@ with main_tabs[0]:
     scanner_strategy = strategy_by_label[chosen_label]
     render_scanner_panel(scanner_strategy, key_prefix=scanner_strategy.id)
 
-for strategy, backtest_tab in zip(STRATEGIES, main_tabs[1:-2]):
+for strategy, backtest_tab in zip(STRATEGIES, main_tabs[1:-3]):
     with backtest_tab:
         render_backtest_panel(strategy, key_prefix=strategy.id)
 
-with main_tabs[-2]:
+with main_tabs[-3]:
     render_sweep_panel()
 
-with main_tabs[-1]:
+with main_tabs[-2]:
     render_news_panel()
+
+with main_tabs[-1]:
+    render_admin_fetch_panel()

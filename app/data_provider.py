@@ -1,20 +1,28 @@
 """Price history data sources for the app.
 
-Two sources are supported:
+Three sources are supported:
 
 - "sample": bundled SYNTHETIC csvs under data/sample_prices/ (see
   scripts/generate_sample_data.py). Works with zero setup, zero network,
   zero API key -- this is what makes the app runnable immediately. Only
   daily bars exist on disk; weekly/monthly are produced by resampling them
   on the fly, and intraday intervals aren't available at all.
+- "offline": REAL historical daily OHLCV, pre-fetched via yfinance and
+  cached to disk as plain per-ticker csvs under data/historical_prices/
+  (see app.admin_fetch, which builds this directory -- typically a broad
+  market universe filtered to a minimum market cap, e.g. S&P 500+400+600
+  filtered to >= $1B). Like "sample", this never touches the network at
+  read time; it's just a much bigger, real-data version of the same
+  bundled-csv idea. Daily bars only (whatever was fetched); weekly/monthly
+  are resampled on the fly like sample data.
 - "yfinance": real historical data via the free `yfinance` package (no API
   key required). Needs `pip install yfinance` and internet access, neither
   of which is available in this dev sandbox, so this path is not covered by
   the automated tests -- it's plain, standard yfinance usage.
 
-Both paths return the same canonical shape (a pandas DataFrame as produced
-by engine.data_utils.to_dataframe), so the rest of the app never has to
-care which source it's looking at.
+All three paths return the same canonical shape (a pandas DataFrame as
+produced by engine.data_utils.to_dataframe), so the rest of the app never
+has to care which source it's looking at.
 
 Live fetches are cached to disk (see app.cache) so the app doesn't have to
 hit yfinance on every scan/backtest -- a fetch is reused for
@@ -32,6 +40,7 @@ from app import cache
 from engine.data_utils import resample_ohlcv, to_dataframe, trim_date_range
 
 SAMPLE_DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "sample_prices"
+OFFLINE_DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "historical_prices"
 
 
 def list_sample_tickers() -> List[str]:
@@ -65,6 +74,58 @@ def load_sample_universe(start=None, end=None, interval: str = "1d") -> Dict[str
         t: load_sample_ticker(t, start=start, end=end, interval=interval)
         for t in list_sample_tickers()
     }
+
+
+def list_offline_tickers() -> List[str]:
+    """Tickers currently present in the offline (pre-fetched, real) dataset
+    -- empty until app.admin_fetch has been run at least once and its
+    output committed. Sorted for a stable, predictable dropdown order."""
+    if not OFFLINE_DATA_DIR.exists():
+        return []
+    return sorted(p.stem for p in OFFLINE_DATA_DIR.glob("*.csv"))
+
+
+def load_offline_ticker(
+    ticker: str,
+    start=None,
+    end=None,
+    interval: str = "1d",
+) -> pd.DataFrame:
+    """Load one ticker from the offline (pre-fetched, real) dataset, same
+    trim/resample behavior as load_sample_ticker. Raises ValueError if this
+    ticker was never fetched (the offline universe is a few thousand
+    tickers at most, so -- unlike load_sample_ticker's error -- this does
+    NOT dump the whole available list, just the count)."""
+    path = OFFLINE_DATA_DIR / f"{ticker.upper()}.csv"
+    if not path.exists():
+        n_available = len(list_offline_tickers())
+        raise ValueError(
+            f"No offline data for '{ticker}' ({n_available} ticker(s) available). "
+            "Build/refresh the dataset from the Admin tab, or switch to Live (yfinance)."
+        )
+    df = to_dataframe(pd.read_csv(path))
+    df = trim_date_range(df, start=start, end=end)
+    if interval != "1d":
+        df = resample_ohlcv(df, interval)
+    return df
+
+
+def load_offline_universe(
+    tickers: List[str], start=None, end=None, interval: str = "1d"
+) -> Dict[str, pd.DataFrame]:
+    """Like load_sample_universe, but only for the given tickers (the
+    offline universe can be 1000+ tickers, so callers -- e.g. the Scanner
+    tab -- pass the specific list they asked for rather than getting
+    everything back). Tickers with no offline data are silently skipped,
+    same "skip and report what's missing" convention the Scanner tab
+    already uses for yfinance."""
+    out: Dict[str, pd.DataFrame] = {}
+    for t in tickers:
+        try:
+            out[t.strip().upper()] = load_offline_ticker(t.strip(), start=start, end=end, interval=interval)
+        except ValueError:
+            continue
+    return out
 
 
 def range_key(period: Optional[str], start, end) -> str:
@@ -195,8 +256,10 @@ def get_price_history(
 ) -> pd.DataFrame:
     if source == "sample":
         return load_sample_ticker(ticker, start=start, end=end, interval=interval)
+    if source == "offline":
+        return load_offline_ticker(ticker, start=start, end=end, interval=interval)
     if source == "yfinance":
         return fetch_yfinance_ticker(
             ticker, period=period, start=start, end=end, interval=interval, **cache_kwargs
         )
-    raise ValueError(f"Unknown source: {source!r} (expected 'sample' or 'yfinance')")
+    raise ValueError(f"Unknown source: {source!r} (expected 'sample', 'offline', or 'yfinance')")
