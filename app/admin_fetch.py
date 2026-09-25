@@ -387,15 +387,45 @@ def render_admin_fetch_panel() -> None:
             "Batch size (tickers per click)", min_value=1, max_value=200, value=50, step=10
         )
 
-    st.caption(f"Universe: **{len(universe)} ticker(s)** from `{DEFAULT_TICKER_LIST_PATH.name}`.")
+    # Disk truth (what's actually saved under data/historical_prices/), not a
+    # session counter -- this is what lets "Fetch next batch" always make
+    # forward progress through the tickers that are genuinely still missing,
+    # even after a redeploy or a fresh session resets admin_fetch_idx back to
+    # 0. Without this, resuming after e.g. 1,300/1,500 tickers were already
+    # fetched in an earlier session would restart from element 0 of the
+    # universe and re-attempt everything already on disk.
+    already_on_disk = set(list_offline_tickers())
+    on_disk_in_universe = [t for t in universe if t in already_on_disk]
+    skip_existing = st.checkbox(
+        "Skip tickers already on disk (recommended)",
+        value=True,
+        help="Only fetch tickers from the universe that don't have a csv yet, so "
+        "'Fetch next batch' resumes from wherever the dataset actually left off "
+        "-- including after a redeploy or a brand new session, when the counter "
+        "below has reset to 0. To refresh a ticker that's already on disk, use "
+        "'Update to latest' above instead; uncheck this only if you deliberately "
+        "want to re-fetch and overwrite tickers that already have a csv.",
+    )
+    pending = [t for t in universe if t not in already_on_disk] if skip_existing else universe
+
+    st.caption(
+        f"Universe: **{len(universe)} ticker(s)** from `{DEFAULT_TICKER_LIST_PATH.name}` -- "
+        f"**{len(on_disk_in_universe)} already on disk**, **{len(pending)} pending** "
+        f"{'to fetch' if skip_existing else '(skip-existing is off)'}."
+    )
 
     st.session_state.setdefault("admin_fetch_idx", 0)
     st.session_state.setdefault("admin_fetch_results", [])
-
     idx = st.session_state["admin_fetch_idx"]
-    remaining = len(universe) - idx
-    st.progress(min(idx / len(universe), 1.0) if universe else 1.0)
-    st.caption(f"{idx} / {len(universe)} ticker(s) attempted so far this session ({remaining} remaining).")
+
+    if skip_existing:
+        remaining = len(pending)
+        st.progress(min(len(on_disk_in_universe) / len(universe), 1.0) if universe else 1.0)
+        st.caption(f"{len(on_disk_in_universe)} / {len(universe)} ticker(s) on disk ({remaining} pending).")
+    else:
+        remaining = len(pending) - idx
+        st.progress(min(idx / len(pending), 1.0) if pending else 1.0)
+        st.caption(f"{idx} / {len(pending)} ticker(s) attempted so far this session ({remaining} remaining).")
 
     col_a, col_b, col_c = st.columns(3)
     with col_a:
@@ -409,7 +439,7 @@ def render_admin_fetch_panel() -> None:
         pass
 
     if run_batch:
-        batch = universe[idx : idx + int(batch_size)]
+        batch = pending[: int(batch_size)] if skip_existing else pending[idx : idx + int(batch_size)]
         progress_bar = st.progress(0.0)
         status = st.empty()
 
@@ -425,7 +455,8 @@ def render_admin_fetch_panel() -> None:
                 progress_cb=_cb,
             )
         st.session_state["admin_fetch_results"].extend(results)
-        st.session_state["admin_fetch_idx"] = idx + len(batch)
+        if not skip_existing:
+            st.session_state["admin_fetch_idx"] = idx + len(batch)
         st.rerun()
 
     all_results = st.session_state["admin_fetch_results"]

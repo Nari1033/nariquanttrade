@@ -165,7 +165,14 @@ crossover days and P/L can be computed by hand and checked exactly).
   to a minimum market cap (checked cheaply via yfinance's `fast_info`
   before spending time on a full history fetch); adjustable years of
   history and batch size. Click "Fetch next batch" repeatedly (or return
-  later) to work through the universe. Because Streamlit Cloud's
+  later) to work through the universe. "Skip tickers already on disk"
+  (on by default) makes each click resume from whatever's genuinely still
+  missing rather than the front of the universe list, so returning after
+  1,300 of 1,500 tickers are already fetched -- in a new session, or after
+  a redeploy -- picks up with the remaining ~200 instead of restarting at
+  element 0 and re-fetching everything already saved; switch it off only
+  to deliberately force a full re-fetch pass over the raw list. Because
+  Streamlit Cloud's
   filesystem is ephemeral, anything fetched is lost on the next
   reboot/redeploy unless you download the "dataset so far" zip and commit
   `data/historical_prices/` into the repo yourself -- that's what makes it
