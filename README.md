@@ -171,6 +171,18 @@ crossover days and P/L can be computed by hand and checked exactly).
   `data/historical_prices/` into the repo yourself -- that's what makes it
   available to every future deploy, not just the running session.
 
+  Once a ticker has been fetched, the same tab's **"Update to latest"**
+  section tops it up instead of re-fetching years of history: it reads
+  each on-disk CSV's last stored date and pulls only the bars from the
+  next day through today, appending them (de-duped and re-sorted) back
+  into the same file. Click "Update next batch" to work through the
+  tickers already on disk in the same batched, resumable way as the
+  initial fetch; a ticker with nothing new yet (e.g. checked again the
+  same day, or over a weekend) is reported as "already current" rather
+  than an error. This is the cheap way to keep an already-built dataset
+  current -- re-download the full history again only if you need to
+  widen the years-of-history window.
+
 ### Sample data disclaimer
 
 `data/sample_prices/*.csv` (ACME, GLOBEX, INITECH, WAYNE, CYBERDYNE,

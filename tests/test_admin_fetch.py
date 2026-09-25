@@ -6,6 +6,7 @@ fixtures, no mocking framework)."""
 
 from __future__ import annotations
 
+import datetime as dt
 import sys
 import tempfile
 import unittest
@@ -21,6 +22,8 @@ from app.admin_fetch import (
     fetch_one_ticker,
     load_ticker_universe,
     save_ticker_csv,
+    update_batch,
+    update_one_ticker,
     zip_offline_dataset,
 )
 from engine.data_utils import to_dataframe
@@ -260,6 +263,181 @@ class TestZipOfflineDataset(unittest.TestCase):
             missing = Path(td) / "does_not_exist"
             zip_bytes = zip_offline_dataset(out_dir=missing)
             self.assertIsInstance(zip_bytes, bytes)
+
+
+# ---------------------------------------------------------------------------
+# "Update to latest" -- update_one_ticker/update_batch. Same injected-fake
+# convention as above: history_range_fn is always a hand-written fake, no
+# real network access.
+# ---------------------------------------------------------------------------
+
+
+def _existing_csv(out_dir: Path, ticker: str, last_date: str, rows: int = 5) -> None:
+    """Seed out_dir/<TICKER>.csv with `rows` daily bars ending on
+    `last_date` (inclusive), in the same schema save_ticker_csv writes."""
+    dates = pd.date_range(end=last_date, periods=rows, freq="D")
+    df = to_dataframe(
+        pd.DataFrame(
+            {
+                "date": dates,
+                "open": [1.0] * rows,
+                "high": [2.0] * rows,
+                "low": [0.5] * rows,
+                "close": [1.5] * rows,
+                "volume": [1000] * rows,
+            }
+        )
+    )
+    save_ticker_csv(df, ticker, out_dir=out_dir)
+
+
+def _fake_history_range(ticker: str, start: dt.date, end: dt.date) -> pd.DataFrame:
+    """A fake history_range_fn returning one bar per day in [start, end]."""
+    dates = pd.date_range(start, end, freq="D")
+    return to_dataframe(
+        pd.DataFrame(
+            {
+                "date": dates,
+                "open": [10.0] * len(dates),
+                "high": [11.0] * len(dates),
+                "low": [9.0] * len(dates),
+                "close": [10.5] * len(dates),
+                "volume": [2000] * len(dates),
+            }
+        )
+    )
+
+
+def _empty_history_range(ticker: str, start: dt.date, end: dt.date) -> pd.DataFrame:
+    return to_dataframe(
+        pd.DataFrame(columns=["open", "high", "low", "close", "volume"]).set_index(
+            pd.DatetimeIndex([], name="date")
+        )
+    )
+
+
+def _failing_history_range(ticker: str, start: dt.date, end: dt.date) -> pd.DataFrame:
+    raise ValueError(f"yfinance returned no data for '{ticker}' between {start} and {end}")
+
+
+class TestUpdateOneTicker(unittest.TestCase):
+    def test_not_found_when_no_existing_csv(self):
+        with tempfile.TemporaryDirectory() as td:
+            result = update_one_ticker(
+                "aapl",
+                out_dir=Path(td),
+                end=dt.date(2024, 1, 10),
+                history_range_fn=_fake_history_range,
+            )
+            self.assertEqual(result["status"], "not_found")
+
+    def test_updated_appends_new_rows_and_advances_last_date(self):
+        with tempfile.TemporaryDirectory() as td:
+            out_dir = Path(td)
+            _existing_csv(out_dir, "AAPL", last_date="2024-01-05", rows=5)  # 01-01..01-05
+            result = update_one_ticker(
+                "aapl",
+                out_dir=out_dir,
+                end=dt.date(2024, 1, 10),
+                history_range_fn=_fake_history_range,
+            )
+            self.assertEqual(result["status"], "updated")
+            self.assertEqual(result["last_date"], "2024-01-05")
+            self.assertEqual(result["rows_added"], 5)  # 01-06..01-10 inclusive
+
+            written = to_dataframe(pd.read_csv(out_dir / "AAPL.csv"))
+            self.assertEqual(len(written), 10)  # 5 original + 5 new
+            self.assertEqual(written.index.max().date(), dt.date(2024, 1, 10))
+            self.assertEqual(written.index.min().date(), dt.date(2024, 1, 1))
+            # New rows use the fake's distinct values (10.5), confirming
+            # they were actually appended, not just re-saved unchanged.
+            self.assertEqual(written["close"].iloc[-1], 10.5)
+
+    def test_up_to_date_when_last_date_already_covers_end(self):
+        with tempfile.TemporaryDirectory() as td:
+            out_dir = Path(td)
+            _existing_csv(out_dir, "AAPL", last_date="2024-01-10", rows=5)
+            result = update_one_ticker(
+                "aapl",
+                out_dir=out_dir,
+                end=dt.date(2024, 1, 10),  # same as last stored date -- nothing newer to fetch
+                history_range_fn=_fake_history_range,
+            )
+            self.assertEqual(result["status"], "up_to_date")
+            self.assertIsNone(result["rows_added"])
+
+    def test_up_to_date_when_range_fetch_returns_empty(self):
+        # e.g. the only "new" day is a weekend/holiday with no trading bar.
+        with tempfile.TemporaryDirectory() as td:
+            out_dir = Path(td)
+            _existing_csv(out_dir, "AAPL", last_date="2024-01-05", rows=5)
+            result = update_one_ticker(
+                "aapl",
+                out_dir=out_dir,
+                end=dt.date(2024, 1, 6),
+                history_range_fn=_empty_history_range,
+            )
+            self.assertEqual(result["status"], "up_to_date")
+            # The csv on disk must be untouched (still 5 rows), not
+            # overwritten with an empty file.
+            written = to_dataframe(pd.read_csv(out_dir / "AAPL.csv"))
+            self.assertEqual(len(written), 5)
+
+    def test_failed_status_when_range_fetch_raises(self):
+        with tempfile.TemporaryDirectory() as td:
+            out_dir = Path(td)
+            _existing_csv(out_dir, "AAPL", last_date="2024-01-05", rows=5)
+            result = update_one_ticker(
+                "aapl",
+                out_dir=out_dir,
+                end=dt.date(2024, 1, 10),
+                history_range_fn=_failing_history_range,
+            )
+            self.assertEqual(result["status"], "failed")
+            self.assertIn("no data", result["error"])
+
+    def test_default_end_is_today_when_not_given(self):
+        with tempfile.TemporaryDirectory() as td:
+            out_dir = Path(td)
+            today = dt.date.today()
+            _existing_csv(out_dir, "AAPL", last_date=str(today), rows=3)
+            result = update_one_ticker(
+                "aapl", out_dir=out_dir, history_range_fn=_fake_history_range
+            )
+            # Already up to date as of today -- confirms `end` defaulted
+            # to dt.date.today() rather than staying None.
+            self.assertEqual(result["status"], "up_to_date")
+
+
+class TestUpdateBatch(unittest.TestCase):
+    def test_calls_progress_cb_for_each_ticker(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as td:
+            out_dir = Path(td)
+            for t in ("AAA", "BBB"):
+                _existing_csv(out_dir, t, last_date="2024-01-05", rows=3)
+            update_batch(
+                ["AAA", "BBB"],
+                out_dir=out_dir,
+                end=dt.date(2024, 1, 8),
+                history_range_fn=_fake_history_range,
+                progress_cb=lambda done, total: calls.append((done, total)),
+            )
+            self.assertEqual(calls, [(1, 2), (2, 2)])
+
+    def test_mixed_results_not_found_and_updated(self):
+        with tempfile.TemporaryDirectory() as td:
+            out_dir = Path(td)
+            _existing_csv(out_dir, "AAA", last_date="2024-01-05", rows=3)
+            # "BBB" has no existing csv at all.
+            results = update_batch(
+                ["AAA", "BBB"],
+                out_dir=out_dir,
+                end=dt.date(2024, 1, 8),
+                history_range_fn=_fake_history_range,
+            )
+            statuses = {r["ticker"]: r["status"] for r in results}
+            self.assertEqual(statuses, {"AAA": "updated", "BBB": "not_found"})
 
 
 if __name__ == "__main__":

@@ -34,6 +34,7 @@ writing csvs) with fetch functions mocked out.
 
 from __future__ import annotations
 
+import datetime as dt
 import io
 import zipfile
 from pathlib import Path
@@ -81,6 +82,20 @@ def get_market_cap(ticker: str) -> Optional[float]:
         return None
 
 
+def _normalize_yf_download(raw: pd.DataFrame) -> pd.DataFrame:
+    """Shared cleanup for whatever yf.download() hands back -- flatten a
+    MultiIndex (yfinance nests columns under the ticker for some call
+    shapes), lowercase column names, name the index "date", and hand back
+    just the OHLCV columns in canonical to_dataframe shape. Shared by both
+    the initial full-history fetch and the incremental range update below
+    so they can't drift out of sync on this normalization."""
+    if isinstance(raw.columns, pd.MultiIndex):
+        raw.columns = [c[0] for c in raw.columns]
+    raw = raw.rename(columns=str.lower)
+    raw.index.name = "date"
+    return to_dataframe(raw[["open", "high", "low", "close", "volume"]])
+
+
 def _download_history(ticker: str, years: int) -> pd.DataFrame:
     import yfinance as yf
 
@@ -89,11 +104,35 @@ def _download_history(ticker: str, years: int) -> pd.DataFrame:
     )
     if raw is None or raw.empty:
         raise ValueError(f"yfinance returned no data for '{ticker}'")
-    if isinstance(raw.columns, pd.MultiIndex):
-        raw.columns = [c[0] for c in raw.columns]
-    raw = raw.rename(columns=str.lower)
-    raw.index.name = "date"
-    return to_dataframe(raw[["open", "high", "low", "close", "volume"]])
+    return _normalize_yf_download(raw)
+
+
+def _download_history_range(ticker: str, start: dt.date, end: dt.date) -> pd.DataFrame:
+    """Like _download_history, but a specific [start, end] date range
+    instead of "the last N years" -- used to top up an already-fetched
+    ticker with just the bars newer than what's already on disk. Unlike
+    _download_history, an empty result is NOT an error here: it just means
+    there's nothing newer yet (e.g. start is today or a weekend/holiday
+    with no new trading day), so this returns an empty (but correctly
+    shaped) DataFrame instead of raising."""
+    import yfinance as yf
+
+    raw = yf.download(
+        ticker,
+        start=start.isoformat(),
+        end=(end + dt.timedelta(days=1)).isoformat(),  # yfinance's `end` is exclusive
+        interval="1d",
+        progress=False,
+        auto_adjust=False,
+        group_by="column",
+    )
+    if raw is None or raw.empty:
+        return to_dataframe(
+            pd.DataFrame(columns=["open", "high", "low", "close", "volume"]).set_index(
+                pd.DatetimeIndex([], name="date")
+            )
+        )
+    return _normalize_yf_download(raw)
 
 
 def save_ticker_csv(df: pd.DataFrame, ticker: str, out_dir: Path = OFFLINE_DATA_DIR) -> Path:
@@ -180,6 +219,99 @@ def fetch_batch(
                 market_cap_fn=market_cap_fn,
                 history_fn=history_fn,
             )
+        )
+        if progress_cb:
+            progress_cb(i, len(tickers))
+    return results
+
+
+def update_one_ticker(
+    ticker: str,
+    out_dir: Path = OFFLINE_DATA_DIR,
+    end: Optional[dt.date] = None,
+    history_range_fn: Callable[[str, dt.date, dt.date], pd.DataFrame] = _download_history_range,
+) -> dict:
+    """Top up one already-fetched ticker's csv with bars newer than its
+    last stored date, through `end` (today by default) -- much cheaper
+    than a full re-fetch (fetch_one_ticker) when the offline dataset just
+    needs to catch up to the present. `history_range_fn` is injectable for
+    network-free unit testing, same convention as fetch_one_ticker's
+    market_cap_fn/history_fn.
+
+    Returns a dict with at least a "status" key, one of:
+      "updated"     -- new bars were fetched and appended.
+      "up_to_date"  -- the last stored date is already >= `end` (or the
+                       range fetch came back empty), nothing to add.
+      "not_found"   -- no existing csv for this ticker -- there's nothing
+                       to top up; use fetch_one_ticker/fetch_batch instead.
+      "failed"      -- reading the existing csv or the range fetch raised;
+                       "error" holds the message.
+    """
+    ticker = ticker.strip().upper()
+    end = end or dt.date.today()
+    result = {"ticker": ticker, "status": None, "last_date": None, "rows_added": None, "error": None}
+
+    path = out_dir / f"{ticker}.csv"
+    if not path.exists():
+        result["status"] = "not_found"
+        return result
+
+    try:
+        existing = to_dataframe(pd.read_csv(path))
+    except Exception as exc:
+        result["status"] = "failed"
+        result["error"] = f"could not read existing csv: {exc}"
+        return result
+
+    if existing.empty:
+        result["status"] = "not_found"
+        return result
+
+    last_date = existing.index.max().date()
+    result["last_date"] = str(last_date)
+
+    start = last_date + dt.timedelta(days=1)
+    if start > end:
+        result["status"] = "up_to_date"
+        return result
+
+    try:
+        new_df = history_range_fn(ticker, start, end)
+    except Exception as exc:
+        result["status"] = "failed"
+        result["error"] = str(exc)
+        return result
+
+    if new_df.empty:
+        result["status"] = "up_to_date"
+        return result
+
+    # De-dupe defensively on date (shouldn't overlap given start =
+    # last_date + 1, but keep the newly-fetched value if it ever does)
+    # and keep the combined series sorted before writing back out.
+    combined = pd.concat([existing, new_df])
+    combined = combined[~combined.index.duplicated(keep="last")].sort_index()
+    save_ticker_csv(combined, ticker, out_dir=out_dir)
+
+    result["status"] = "updated"
+    result["rows_added"] = len(new_df)
+    return result
+
+
+def update_batch(
+    tickers: List[str],
+    out_dir: Path = OFFLINE_DATA_DIR,
+    end: Optional[dt.date] = None,
+    history_range_fn: Callable[[str, dt.date, dt.date], pd.DataFrame] = _download_history_range,
+    progress_cb: Optional[Callable[[int, int], None]] = None,
+) -> List[dict]:
+    """Like fetch_batch, but calls update_one_ticker for each ticker --
+    sequential and gentle on the rate limiter, calling progress_cb(done,
+    total) after each one, never raising for an individual failure."""
+    results = []
+    for i, t in enumerate(tickers, start=1):
+        results.append(
+            update_one_ticker(t, out_dir=out_dir, end=end, history_range_fn=history_range_fn)
         )
         if progress_cb:
             progress_cb(i, len(tickers))
@@ -309,6 +441,72 @@ def render_admin_fetch_panel() -> None:
 
         with st.expander(f"Per-ticker results ({len(all_results)})", expanded=False):
             st.dataframe(pd.DataFrame(all_results), use_container_width=True, hide_index=True)
+
+    st.divider()
+    st.subheader("Update to latest")
+    st.caption(
+        "For tickers already on disk, fetch just the bars newer than each one's last stored "
+        "date (through today) and append them -- much cheaper than a full re-fetch, and the "
+        "way to keep an already-built dataset current."
+    )
+
+    update_universe = list_offline_tickers()
+    if not update_universe:
+        st.caption("Nothing on disk yet to update -- fetch some tickers above first.")
+    else:
+        st.session_state.setdefault("admin_update_idx", 0)
+        st.session_state.setdefault("admin_update_results", [])
+
+        upd_idx = st.session_state["admin_update_idx"]
+        upd_remaining = len(update_universe) - upd_idx
+        st.progress(min(upd_idx / len(update_universe), 1.0) if update_universe else 1.0)
+        st.caption(
+            f"{upd_idx} / {len(update_universe)} on-disk ticker(s) checked so far this session "
+            f"({upd_remaining} remaining)."
+        )
+
+        upd_col_a, upd_col_b = st.columns(2)
+        with upd_col_a:
+            run_update = st.button(
+                "Update next batch ▶", type="primary", disabled=upd_remaining <= 0, key="admin_update_run"
+            )
+        with upd_col_b:
+            if st.button("Reset update progress", key="admin_update_reset"):
+                st.session_state["admin_update_idx"] = 0
+                st.session_state["admin_update_results"] = []
+                st.rerun()
+
+        if run_update:
+            upd_batch = update_universe[upd_idx : upd_idx + int(batch_size)]
+            upd_progress_bar = st.progress(0.0)
+            upd_status = st.empty()
+
+            def _upd_cb(done: int, total: int) -> None:
+                upd_progress_bar.progress(done / total if total else 1.0)
+                upd_status.caption(f"Checking {done} / {total} in this batch…")
+
+            with st.spinner(f"Updating {len(upd_batch)} ticker(s)…"):
+                upd_results = update_batch(upd_batch, progress_cb=_upd_cb)
+            st.session_state["admin_update_results"].extend(upd_results)
+            st.session_state["admin_update_idx"] = upd_idx + len(upd_batch)
+            st.rerun()
+
+        all_update_results = st.session_state["admin_update_results"]
+        if all_update_results:
+            n_updated = sum(1 for r in all_update_results if r["status"] == "updated")
+            n_current = sum(1 for r in all_update_results if r["status"] == "up_to_date")
+            n_upd_failed = sum(1 for r in all_update_results if r["status"] == "failed")
+            rows_added = sum(r["rows_added"] or 0 for r in all_update_results if r["status"] == "updated")
+            u1, u2, u3, u4 = st.columns(4)
+            u1.metric("Checked this session", len(all_update_results))
+            u2.metric("Updated", n_updated, help=f"{rows_added} new bar(s) added in total.")
+            u3.metric("Already current", n_current)
+            u4.metric("Failed", n_upd_failed)
+
+            with st.expander(f"Per-ticker update results ({len(all_update_results)})", expanded=False):
+                st.dataframe(pd.DataFrame(all_update_results), use_container_width=True, hide_index=True)
+
+    st.divider()
 
     offline_count = len(list_offline_tickers())
     st.markdown(f"**{offline_count} ticker(s)** currently on disk in `data/historical_prices/` (this run).")
