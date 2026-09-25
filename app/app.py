@@ -317,6 +317,126 @@ def _typed_params(strategy: Strategy, param_values: dict) -> dict:
     }
 
 
+def _default_scan_tickers() -> str:
+    """Comma-separated starting ticker list for a criteria scan, sized
+    sensibly per data source -- reused by both the Scanner tab and the
+    "tickers meeting criteria" block on each strategy's Backtest tab, so
+    the two don't drift out of sync."""
+    if source == "sample":
+        return ", ".join(list_sample_tickers())
+    if source == "offline":
+        return ", ".join(list_offline_tickers()[:10])
+    return "AAPL, MSFT, NVDA, GOOGL, AMZN"
+
+
+def _load_universe_for_source(tickers: List[str], start, end, interval: str):
+    """Load `tickers` from whichever source is selected in the sidebar,
+    returning (universe, missing) -- universe is {ticker: df} for whatever
+    loaded successfully, missing is the tickers that didn't. Shared by the
+    Scanner tab and the per-strategy "tickers meeting criteria" scan so
+    both use identical per-source loading behavior."""
+    if source == "sample":
+        universe, missing = {}, []
+        for t in tickers:
+            try:
+                universe[t] = load_sample_ticker(t, start=start, end=end, interval=interval)
+            except ValueError:
+                missing.append(t)
+        return universe, missing
+    if source == "offline":
+        universe = load_offline_universe(tickers, start=start, end=end, interval=interval)
+        missing = [t for t in tickers if t not in universe]
+        return universe, missing
+    universe = fetch_yfinance_universe(
+        tickers,
+        start=start,
+        end=end,
+        interval=interval,
+        max_age_hours=cache_max_age_hours,
+        force_refresh=force_refresh,
+    )
+    missing = [t for t in tickers if t not in universe]
+    return universe, missing
+
+
+def _render_criteria_scan(strategy: Strategy, key_prefix: str, typed_params: dict) -> None:
+    """"Tickers currently meeting this strategy's entry criteria" block,
+    shown on the strategy's own Backtest tab so you don't have to jump to
+    the separate Scanner tab and re-pick the strategy/params -- runs the
+    same scan_fn + typed_params this page's backtest itself would use,
+    against a user-editable ticker list (button-triggered, not automatic,
+    since a Live source scan makes real API calls per ticker)."""
+    with st.expander("🔍 Tickers currently meeting this strategy's entry criteria", expanded=False):
+        st.caption(
+            "Runs this strategy's scan signal (same logic as the Scanner tab, using the "
+            "parameters set above) across a ticker list, using whichever data source is "
+            "selected in the sidebar."
+        )
+        offline_tickers = list_offline_tickers() if source == "offline" else []
+        scan_all_offline = False
+        if source == "offline" and offline_tickers:
+            scan_all_offline = st.checkbox(
+                f"Scan the full offline dataset ({len(offline_tickers)} ticker(s)) instead of the list below",
+                value=False,
+                key=f"{key_prefix}_crit_all_offline",
+            )
+        crit_col1, crit_col2 = st.columns([3, 1])
+        with crit_col1:
+            crit_ticker_input = st.text_input(
+                "Tickers to check (comma-separated)",
+                value=_default_scan_tickers(),
+                key=f"{key_prefix}_crit_tickers",
+                disabled=scan_all_offline,
+            )
+        with crit_col2:
+            crit_lookback_days = st.number_input(
+                "Signal within last N bars",
+                min_value=1,
+                max_value=20,
+                value=3,
+                key=f"{key_prefix}_crit_lookback",
+            )
+        run_crit_scan = st.button("Scan", key=f"{key_prefix}_crit_run")
+
+        if not run_crit_scan:
+            return
+
+        crit_tickers = (
+            offline_tickers
+            if scan_all_offline
+            else [t.strip().upper() for t in crit_ticker_input.split(",") if t.strip()]
+        )
+        if not crit_tickers:
+            st.warning("Enter at least one ticker.")
+            return
+
+        with st.spinner(f"Checking {len(crit_tickers)} ticker(s)..."):
+            crit_universe, crit_missing = _load_universe_for_source(
+                crit_tickers, start=TODAY - dt.timedelta(days=730), end=TODAY, interval="1d"
+            )
+
+        if crit_missing:
+            st.warning(f"Could not load data for: {', '.join(crit_missing)}")
+
+        if not crit_universe:
+            st.error("No price data available for the requested tickers.")
+            return
+
+        crit_matches = scan_universe(
+            crit_universe,
+            strategy_fn=strategy.scan_fn,
+            lookback_days=int(crit_lookback_days),
+            **typed_params,
+        )
+        if crit_matches:
+            st.success(
+                f"{len(crit_matches)} of {len(crit_universe)} ticker(s) currently meet entry "
+                f"criteria: {', '.join(sorted(crit_matches))}"
+            )
+        else:
+            st.info(f"None of the {len(crit_universe)} ticker(s) checked currently meet entry criteria.")
+
+
 def render_scanner_panel(strategy: Strategy, key_prefix: str) -> None:
     st.caption(strategy.description)
 
@@ -343,26 +463,17 @@ def render_scanner_panel(strategy: Strategy, key_prefix: str) -> None:
         )
         scan_interval = INTERVAL_CHOICES[scan_interval_label]
 
-    if source == "sample":
-        default_tickers = ", ".join(list_sample_tickers())
-        ticker_input = st.text_input(
-            "Tickers to scan (comma-separated)", value=default_tickers, key=f"{key_prefix}_scan_tickers"
-        )
-    elif source == "offline":
-        offline_tickers = list_offline_tickers()
-        default_tickers = ", ".join(offline_tickers[:10])
-        ticker_input = st.text_input(
-            "Tickers to scan (comma-separated)",
-            value=default_tickers,
-            key=f"{key_prefix}_scan_tickers",
-            help=f"{len(offline_tickers)} ticker(s) available offline -- showing the first 10 as a starting point.",
-        )
-    else:
-        ticker_input = st.text_input(
-            "Tickers to scan (comma-separated)",
-            value="AAPL, MSFT, NVDA, GOOGL, AMZN",
-            key=f"{key_prefix}_scan_tickers",
-        )
+    ticker_input = st.text_input(
+        "Tickers to scan (comma-separated)",
+        value=_default_scan_tickers(),
+        key=f"{key_prefix}_scan_tickers",
+        help=(
+            f"{len(list_offline_tickers())} ticker(s) available offline -- showing the "
+            "first 10 as a starting point."
+            if source == "offline"
+            else None
+        ),
+    )
 
     run_scan = st.button("Run scan", type="primary", key=f"{key_prefix}_scan_run")
 
@@ -373,30 +484,9 @@ def render_scanner_panel(strategy: Strategy, key_prefix: str) -> None:
 
         tickers = [t.strip().upper() for t in ticker_input.split(",") if t.strip()]
         with st.spinner(f"Loading price history for {len(tickers)} ticker(s)..."):
-            if source == "sample":
-                universe, missing = {}, []
-                for t in tickers:
-                    try:
-                        universe[t] = load_sample_ticker(
-                            t, start=scan_start, end=scan_end, interval=scan_interval
-                        )
-                    except ValueError:
-                        missing.append(t)
-            elif source == "offline":
-                universe = load_offline_universe(
-                    tickers, start=scan_start, end=scan_end, interval=scan_interval
-                )
-                missing = [t for t in tickers if t not in universe]
-            else:
-                universe = fetch_yfinance_universe(
-                    tickers,
-                    start=scan_start,
-                    end=scan_end,
-                    interval=scan_interval,
-                    max_age_hours=cache_max_age_hours,
-                    force_refresh=force_refresh,
-                )
-                missing = [t for t in tickers if t not in universe]
+            universe, missing = _load_universe_for_source(
+                tickers, start=scan_start, end=scan_end, interval=scan_interval
+            )
 
         if missing:
             st.warning(f"Could not load data for: {', '.join(missing)}")
@@ -488,6 +578,8 @@ def render_backtest_panel(strategy: Strategy, key_prefix: str) -> None:
     # are nowhere near a sensible bar count.
     sma_window_params = [p for p in strategy.params if p.is_sma_window]
     max_window = max([p.default for p in sma_window_params] or [0])
+
+    _render_criteria_scan(strategy, key_prefix, _typed_params(strategy, param_values))
 
     run_backtest = st.button("Run backtest", type="primary", key=f"{key_prefix}_bt_run")
 
