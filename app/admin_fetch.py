@@ -41,7 +41,7 @@ from typing import Callable, List, Optional
 
 import pandas as pd
 
-from app.data_provider import OFFLINE_DATA_DIR
+from app.data_provider import OFFLINE_DATA_DIR, list_offline_tickers
 from engine.data_utils import to_dataframe
 
 DEFAULT_TICKER_LIST_PATH = Path(__file__).resolve().parent.parent / "data" / "tickers" / "broad_market.csv"
