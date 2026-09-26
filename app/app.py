@@ -785,12 +785,15 @@ def render_sweep_panel() -> None:
         if source == "sample":
             sweep_ticker = st.selectbox("Ticker", list_sample_tickers(), key="sweep_ticker")
         elif source == "offline":
-            offline_tickers = list_offline_tickers()
-            if offline_tickers:
-                sweep_ticker = st.selectbox("Ticker", offline_tickers, key="sweep_ticker")
-            else:
-                st.warning("No offline data yet -- see the 🗄️ Build Dataset tab.")
-                sweep_ticker = None
+            sweep_ticker = st.text_input(
+                "Ticker",
+                value="AAPL",
+                key="sweep_ticker",
+                help=(
+                    f"{len(list_offline_tickers())} ticker(s) currently on disk. Type any "
+                    "ticker -- if it isn't on disk yet, this fetches it live instead."
+                ),
+            ).strip().upper()
         else:
             sweep_ticker = st.text_input("Ticker", value="AAPL", key="sweep_ticker").strip().upper()
     with col3:
@@ -878,24 +881,63 @@ def render_sweep_panel() -> None:
     if sweep_ticker is None:
         return
 
+    used_offline_fallback = False
+    used_live_fallback = False
+    fallback_error = None
     try:
         with st.spinner(f"Loading {sweep_ticker} price history..."):
             if source == "sample":
                 df = load_sample_ticker(sweep_ticker, start=fetch_start, end=fetch_end, interval="1d")
             elif source == "offline":
-                df = load_offline_ticker(sweep_ticker, start=fetch_start, end=fetch_end, interval="1d")
+                try:
+                    df = load_offline_ticker(sweep_ticker, start=fetch_start, end=fetch_end, interval="1d")
+                except Exception as exc:
+                    # Typed a ticker that isn't in data/historical_prices/
+                    # yet -- fetch it live instead of just failing (same
+                    # fallback as the Backtest tab).
+                    try:
+                        df = fetch_yfinance_ticker(
+                            sweep_ticker,
+                            start=fetch_start,
+                            end=fetch_end,
+                            interval="1d",
+                            max_age_hours=cache_max_age_hours,
+                            force_refresh=force_refresh,
+                        )
+                    except Exception:
+                        raise exc
+                    used_live_fallback = True
+                    fallback_error = exc
             else:
-                df = fetch_yfinance_ticker(
-                    sweep_ticker,
-                    start=fetch_start,
-                    end=fetch_end,
-                    interval="1d",
-                    max_age_hours=cache_max_age_hours,
-                    force_refresh=force_refresh,
-                )
+                try:
+                    df = fetch_yfinance_ticker(
+                        sweep_ticker,
+                        start=fetch_start,
+                        end=fetch_end,
+                        interval="1d",
+                        max_age_hours=cache_max_age_hours,
+                        force_refresh=force_refresh,
+                    )
+                except Exception as exc:
+                    try:
+                        df = load_offline_ticker(sweep_ticker, start=fetch_start, end=fetch_end, interval="1d")
+                    except Exception:
+                        raise exc
+                    used_offline_fallback = True
+                    fallback_error = exc
     except Exception as exc:
         st.error(f"Couldn't load data for '{sweep_ticker}': {exc}")
         return
+
+    if used_offline_fallback:
+        st.info(
+            f"ℹ️ Live data wasn't available for '{sweep_ticker}' ({fallback_error}) -- "
+            "sweeping against the saved offline dataset instead."
+        )
+    elif used_live_fallback:
+        st.info(
+            f"ℹ️ '{sweep_ticker}' isn't in the offline dataset yet -- fetched it live instead."
+        )
 
     progress_bar = st.progress(0.0)
     status = st.empty()
