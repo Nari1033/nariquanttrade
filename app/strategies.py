@@ -134,7 +134,8 @@ def _rsi_momentum_scan(bars, lookback_days: int = 3, **kwargs) -> bool:
         bars,
         period=int(kwargs.get("period", 14)),
         buy_threshold=float(kwargs.get("buy_threshold", 70.0)),
-        sell_threshold=float(kwargs.get("sell_threshold", 90.0)),
+        overbought_threshold=float(kwargs.get("overbought_threshold", 80.0)),
+        exit_threshold=float(kwargs.get("exit_threshold", 60.0)),
         lookback_days=lookback_days,
     )
 
@@ -329,11 +330,14 @@ STRATEGIES: List[Strategy] = [
         description=(
             "Not the textbook RSI strategy -- this one buys strength instead of "
             "fading it. Buy when RSI(14) rises up through the buy threshold (70 "
-            "by default), touching or crossing it from below; sell when RSI rises "
-            "further and touches or crosses the (higher) sell threshold (90), an "
-            "extreme reading taken as the profit-taking exit. A stop loss is "
-            "included since RSI can stall or roll over well below the sell "
-            "threshold while price keeps falling."
+            "by default), touching or crossing it from below. Sell with a "
+            "\"faded momentum\" exit: once RSI has reached the overbought "
+            "threshold (80) at some point since entry, sell as soon as it falls "
+            "back to the (lower) exit threshold (60). A fixed extreme sell "
+            "level like 90 almost never gets hit on real daily data, so this "
+            "overbought-then-pullback design is what actually produces trades. "
+            "A stop loss is included in case price falls hard before RSI ever "
+            "reaches the overbought threshold."
         ),
         params=[
             NumberParam(
@@ -341,16 +345,20 @@ STRATEGIES: List[Strategy] = [
                 help="Number of bars used to smooth average gains/losses (Wilder's method).",
             ),
             NumberParam(
-                "buy_threshold", "Buy threshold (RSI rising through)", 70.0, 50.0, 90.0, step=1.0, is_int=False,
+                "buy_threshold", "Entry (RSI rising through)", 70.0, 50.0, 90.0, step=1.0, is_int=False,
                 help="Buy when RSI rises up through this level.",
             ),
             NumberParam(
-                "sell_threshold", "Sell threshold (RSI rising through)", 90.0, 60.0, 99.0, step=1.0, is_int=False,
-                help="Sell when RSI rises up through this (higher) level -- the profit-taking exit.",
+                "overbought_threshold", "Top (must reach this first)", 80.0, 60.0, 95.0, step=1.0, is_int=False,
+                help="RSI must reach or cross this level at some point after entry before the pullback exit can arm. Must be greater than Entry.",
+            ),
+            NumberParam(
+                "exit_threshold", "Exit (sell when RSI falls back to)", 60.0, 30.0, 75.0, step=1.0, is_int=False,
+                help="Once Top has been reached, sell as soon as RSI falls back to or below this level. Must be less than Top.",
             ),
             NumberParam(
                 "stop_loss_pct", "Stop loss (% below entry)", 15.0, 1.0, 50.0, step=1.0, is_int=False,
-                help="Close the position if price falls this far below the entry price, even without RSI reaching the sell threshold.",
+                help="Close the position if price falls this far below the entry price, even without RSI ever reaching the overbought threshold.",
             ),
         ],
         scan_fn=_rsi_momentum_scan,
