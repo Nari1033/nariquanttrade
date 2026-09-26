@@ -29,6 +29,7 @@ from engine.bollinger import backtest_bollinger_mean_reversion, bollinger_bands,
 from engine.options_backtester import backtest_bull_put_spread
 from engine.cash_secured_put import backtest_cash_secured_put
 from engine.wheel import backtest_wheel_strategy
+from engine.rsi_strategy import backtest_rsi_momentum, rsi_breakout_recent
 from engine.scanner import golden_cross_recent, price_cross_sma_recent
 
 
@@ -126,6 +127,16 @@ def _wheel_scan(bars, lookback_days: int = 3, **kwargs) -> bool:
     # price history to price an option at all," not a timing signal.
     vol_window = int(kwargs.get("vol_window", 20))
     return len(bars) >= vol_window + 5
+
+
+def _rsi_momentum_scan(bars, lookback_days: int = 3, **kwargs) -> bool:
+    return rsi_breakout_recent(
+        bars,
+        period=int(kwargs.get("period", 14)),
+        buy_threshold=float(kwargs.get("buy_threshold", 70.0)),
+        sell_threshold=float(kwargs.get("sell_threshold", 90.0)),
+        lookback_days=lookback_days,
+    )
 
 
 STRATEGIES: List[Strategy] = [
@@ -311,6 +322,39 @@ STRATEGIES: List[Strategy] = [
         ],
         scan_fn=_wheel_scan,
         backtest_fn=backtest_wheel_strategy,
+    ),
+    Strategy(
+        id="rsi_momentum",
+        label="RSI(14) Momentum Breakout",
+        description=(
+            "Not the textbook RSI strategy -- this one buys strength instead of "
+            "fading it. Buy when RSI(14) rises up through the buy threshold (70 "
+            "by default), touching or crossing it from below; sell when RSI rises "
+            "further and touches or crosses the (higher) sell threshold (90), an "
+            "extreme reading taken as the profit-taking exit. A stop loss is "
+            "included since RSI can stall or roll over well below the sell "
+            "threshold while price keeps falling."
+        ),
+        params=[
+            NumberParam(
+                "period", "RSI period", 14, 2, 50, step=1, is_int=True, is_sma_window=True,
+                help="Number of bars used to smooth average gains/losses (Wilder's method).",
+            ),
+            NumberParam(
+                "buy_threshold", "Buy threshold (RSI rising through)", 70.0, 50.0, 90.0, step=1.0, is_int=False,
+                help="Buy when RSI rises up through this level.",
+            ),
+            NumberParam(
+                "sell_threshold", "Sell threshold (RSI rising through)", 90.0, 60.0, 99.0, step=1.0, is_int=False,
+                help="Sell when RSI rises up through this (higher) level -- the profit-taking exit.",
+            ),
+            NumberParam(
+                "stop_loss_pct", "Stop loss (% below entry)", 15.0, 1.0, 50.0, step=1.0, is_int=False,
+                help="Close the position if price falls this far below the entry price, even without RSI reaching the sell threshold.",
+            ),
+        ],
+        scan_fn=_rsi_momentum_scan,
+        backtest_fn=backtest_rsi_momentum,
     ),
 ]
 

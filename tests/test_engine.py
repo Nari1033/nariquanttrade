@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from engine.backtester import backtest_price_sma_crossover, backtest_sma_crossover
 from engine.data_utils import to_dataframe
-from engine.indicators import sma
+from engine.indicators import rsi, sma
 from engine.models import PriceBar
 from engine.scanner import (
     crossover_series,
@@ -117,6 +117,53 @@ class TestSMA(unittest.TestCase):
         result = sma(s, window=5)
         self.assertTrue(result.iloc[:4].isna().all())
         self.assertAlmostEqual(result.iloc[4], (100 * 4 + 1_000_000) / 5)
+
+
+class TestRSI(unittest.TestCase):
+    def test_nan_during_warmup_then_valid(self):
+        s = pd.Series(range(1, 31), dtype=float)
+        result = rsi(s, period=14)
+        # NaN for the first `period` bars (indices 0..13), valid from index
+        # 14 on -- .diff() itself produces one leading NaN, and
+        # min_periods=period on the smoothed gain/loss series holds the
+        # NaN gate open until `period` valid observations have accumulated.
+        self.assertTrue(result.iloc[:14].isna().all())
+        self.assertFalse(result.iloc[14:].isna().any())
+
+    def test_pure_uptrend_is_100(self):
+        # No down bars at all -> average loss stays exactly 0 the whole
+        # way -> RSI = 100 (not just "high"), deterministically.
+        s = pd.Series(range(1, 31), dtype=float)
+        result = rsi(s, period=14)
+        self.assertTrue((result.iloc[14:] == 100.0).all())
+
+    def test_pure_downtrend_is_0(self):
+        s = pd.Series(range(30, 0, -1), dtype=float)
+        result = rsi(s, period=14)
+        self.assertTrue((result.iloc[14:] == 0.0).all())
+
+    def test_flat_price_is_50(self):
+        # Neither gains nor losses -> no directional information -> 50,
+        # not a NaN/inf from a 0/0 division.
+        s = pd.Series([100.0] * 30)
+        result = rsi(s, period=14)
+        self.assertTrue((result.iloc[14:] == 50.0).all())
+
+    def test_raises_on_nonpositive_period(self):
+        s = pd.Series(range(1, 31), dtype=float)
+        with self.assertRaises(ValueError):
+            rsi(s, period=0)
+
+    def test_oscillating_series_stays_within_bounds(self):
+        # A real (non-degenerate) mixed up/down series should never escape
+        # [0, 100], and should show meaningful variation once warmed up.
+        import math
+
+        s = pd.Series([100 + 10 * math.sin(i / 3.0) for i in range(60)])
+        result = rsi(s, period=14).dropna()
+        self.assertTrue((result >= 0).all())
+        self.assertTrue((result <= 100).all())
+        self.assertGreater(result.max() - result.min(), 10)
 
 
 class TestCrossoverAndScanner(unittest.TestCase):
