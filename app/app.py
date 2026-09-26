@@ -443,12 +443,15 @@ def render_backtest_panel(strategy: Strategy, key_prefix: str) -> None:
         if source == "sample":
             bt_ticker = st.selectbox("Ticker", list_sample_tickers(), key=f"{key_prefix}_bt_ticker")
         elif source == "offline":
-            offline_tickers = list_offline_tickers()
-            if offline_tickers:
-                bt_ticker = st.selectbox("Ticker", offline_tickers, key=f"{key_prefix}_bt_ticker")
-            else:
-                st.warning("No offline data yet -- see the 🗄️ Build Dataset tab.")
-                bt_ticker = None
+            bt_ticker = st.text_input(
+                "Ticker",
+                value="AAPL",
+                key=f"{key_prefix}_bt_ticker",
+                help=(
+                    f"{len(list_offline_tickers())} ticker(s) currently on disk. Type any "
+                    "ticker -- if it isn't on disk yet, this fetches it live instead."
+                ),
+            ).strip().upper()
         else:
             bt_ticker = st.text_input("Ticker", value="AAPL", key=f"{key_prefix}_bt_ticker").strip().upper()
     with row1c2:
@@ -505,13 +508,34 @@ def render_backtest_panel(strategy: Strategy, key_prefix: str) -> None:
     fetch_start = bt_start - dt.timedelta(days=int(buffer_days) + 5)
 
     used_offline_fallback = False
-    live_fetch_error = None
+    used_live_fallback = False
+    fallback_error = None
     try:
         with st.spinner(f"Loading {bt_ticker} price history..."):
             if source == "sample":
                 df = load_sample_ticker(bt_ticker, start=fetch_start, end=bt_end, interval=bt_interval)
             elif source == "offline":
-                df = load_offline_ticker(bt_ticker, start=fetch_start, end=bt_end, interval=bt_interval)
+                try:
+                    df = load_offline_ticker(bt_ticker, start=fetch_start, end=bt_end, interval=bt_interval)
+                except Exception as exc:
+                    # Typed a ticker that isn't in data/historical_prices/
+                    # yet -- fetch it live instead of just failing, so
+                    # backtesting isn't limited to whatever's already been
+                    # pre-fetched. Mirror image of the yfinance branch's
+                    # fallback below.
+                    try:
+                        df = fetch_yfinance_ticker(
+                            bt_ticker,
+                            start=fetch_start,
+                            end=bt_end,
+                            interval=bt_interval,
+                            max_age_hours=cache_max_age_hours,
+                            force_refresh=force_refresh,
+                        )
+                    except Exception:
+                        raise exc
+                    used_live_fallback = True
+                    fallback_error = exc
             else:
                 try:
                     df = fetch_yfinance_ticker(
@@ -536,15 +560,19 @@ def render_backtest_panel(strategy: Strategy, key_prefix: str) -> None:
                     except Exception:
                         raise exc
                     used_offline_fallback = True
-                    live_fetch_error = exc
+                    fallback_error = exc
     except Exception as exc:
         st.error(f"Couldn't load data for '{bt_ticker}': {exc}")
         return
 
     if used_offline_fallback:
         st.info(
-            f"ℹ️ Live data wasn't available for '{bt_ticker}' ({live_fetch_error}) -- "
+            f"ℹ️ Live data wasn't available for '{bt_ticker}' ({fallback_error}) -- "
             "backtesting against the saved offline dataset instead."
+        )
+    elif used_live_fallback:
+        st.info(
+            f"ℹ️ '{bt_ticker}' isn't in the offline dataset yet -- fetched it live instead."
         )
 
     typed_params = _typed_params(strategy, param_values)
