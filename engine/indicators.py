@@ -1,4 +1,4 @@
-"""Technical indicators: Simple Moving Averages and RSI."""
+"""Technical indicators: Simple/Exponential Moving Averages, RSI, and ATR."""
 
 from __future__ import annotations
 
@@ -25,6 +25,37 @@ def add_sma_columns(
     for window in windows:
         out[f"sma_{window}"] = sma(out[price_col], window)
     return out
+
+
+def ema(series: pd.Series, period: int) -> pd.Series:
+    """Exponential Moving Average with span=period (the conventional
+    definition -- alpha = 2/(period+1)). NaN until `period` observations
+    are available, same warm-up convention as sma()."""
+    if period < 1:
+        raise ValueError("period must be a positive integer")
+    return series.ewm(span=period, min_periods=period, adjust=False).mean()
+
+
+def atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    """Average True Range, using Wilder's original smoothing (same
+    alpha=1/period exponential smoothing as rsi()'s gain/loss averages).
+
+    True Range for a bar is the largest of: high-low, |high - prev_close|,
+    |low - prev_close| -- the first bar has no prev_close, so its True
+    Range is just high-low. NaN for the first `period` bars while the
+    smoothing warms up, matching rsi()'s convention.
+
+    `df` must have 'high', 'low', 'close' columns (e.g. the output of
+    engine.data_utils.to_dataframe).
+    """
+    if period < 1:
+        raise ValueError("period must be a positive integer")
+    high, low, close = df["high"], df["low"], df["close"]
+    prev_close = close.shift(1)
+    true_range = pd.concat(
+        [high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1
+    ).max(axis=1)
+    return true_range.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean()
 
 
 def rsi(series: pd.Series, period: int = 14) -> pd.Series:

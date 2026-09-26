@@ -67,10 +67,17 @@ INTERVAL_CHOICES = {
     "Weekly": "1wk",
     "Monthly": "1mo",
     "Hourly (live only, recent history)": "1h",
+    "15-Minute (live only, trailing ~60 days)": "15m",
 }
 # Rough calendar days per bar, used only to size the SMA warm-up buffer
 # fetched before a custom backtest start date.
-_BAR_TO_CALENDAR_DAYS = {"1d": 1.0, "1wk": 7.0, "1mo": 31.0, "1h": 1 / 24}
+_BAR_TO_CALENDAR_DAYS = {"1d": 1.0, "1wk": 7.0, "1mo": 31.0, "1h": 1 / 24, "15m": 1 / 96}
+
+# yfinance's own hard limit on how far back it serves intraday bars for a
+# given interval (independent of anything this app does) -- used only to
+# turn a confusing "yfinance returned no data" API error into a clear,
+# actionable one before ever making the request.
+_INTRADAY_MAX_LOOKBACK_DAYS = {"1h": 730, "15m": 60}
 
 TODAY = dt.date.today()
 
@@ -496,9 +503,17 @@ def render_backtest_panel(strategy: Strategy, key_prefix: str) -> None:
         return
     if bt_ticker is None:
         return
-    if source in ("sample", "offline") and bt_interval == "1h":
-        st.error(f"{source_label} is daily-only. Switch to Live (yfinance) for hourly bars.")
+    if source in ("sample", "offline") and bt_interval in _INTRADAY_MAX_LOOKBACK_DAYS:
+        st.error(f"{source_label} is daily-only. Switch to Live (yfinance) for intraday bars.")
         return
+    if bt_interval in _INTRADAY_MAX_LOOKBACK_DAYS:
+        max_lookback = _INTRADAY_MAX_LOOKBACK_DAYS[bt_interval]
+        if (bt_end - bt_start).days > max_lookback:
+            st.error(
+                f"{bt_interval_label} only has the trailing {max_lookback} days available "
+                "from yfinance. Narrow the date range."
+            )
+            return
 
     # Fetch extra history before bt_start so the slowest SMA in this
     # strategy is valid from the very first day of the window you asked

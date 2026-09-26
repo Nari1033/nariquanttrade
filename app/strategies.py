@@ -30,6 +30,12 @@ from engine.options_backtester import backtest_bull_put_spread
 from engine.cash_secured_put import backtest_cash_secured_put
 from engine.wheel import backtest_wheel_strategy
 from engine.rsi_strategy import backtest_rsi_momentum, rsi_breakout_recent
+from engine.luxalgo_strategy import (
+    backtest_market_flow_full,
+    backtest_trendline_breakout_core,
+    market_flow_full_recent,
+    trendline_breakout_recent,
+)
 from engine.scanner import golden_cross_recent, price_cross_sma_recent
 
 
@@ -136,6 +142,31 @@ def _rsi_momentum_scan(bars, lookback_days: int = 3, **kwargs) -> bool:
         buy_threshold=float(kwargs.get("buy_threshold", 70.0)),
         overbought_threshold=float(kwargs.get("overbought_threshold", 80.0)),
         exit_threshold=float(kwargs.get("exit_threshold", 60.0)),
+        lookback_days=lookback_days,
+    )
+
+
+def _trendline_breakout_core_scan(bars, lookback_days: int = 3, **kwargs) -> bool:
+    return trendline_breakout_recent(
+        bars,
+        pivot_lookback=int(kwargs.get("pivot_lookback", 5)),
+        trendline_points=int(kwargs.get("trendline_points", 3)),
+        atr_period=int(kwargs.get("atr_period", 14)),
+        lookback_days=lookback_days,
+    )
+
+
+def _market_flow_full_scan(bars, lookback_days: int = 3, **kwargs) -> bool:
+    return market_flow_full_recent(
+        bars,
+        pivot_lookback=int(kwargs.get("pivot_lookback", 5)),
+        trendline_points=int(kwargs.get("trendline_points", 3)),
+        atr_period=int(kwargs.get("atr_period", 14)),
+        ema_period=int(kwargs.get("ema_period", 20)),
+        opening_range_minutes=int(kwargs.get("opening_range_minutes", 15)),
+        liquidity_lookback_bars=int(kwargs.get("liquidity_lookback_bars", 50)),
+        liquidity_proximity_atr_mult=float(kwargs.get("liquidity_proximity_atr_mult", 1.0)),
+        gap_filter_pct=float(kwargs.get("gap_filter_pct", 2.0)),
         lookback_days=lookback_days,
     )
 
@@ -363,6 +394,118 @@ STRATEGIES: List[Strategy] = [
         ],
         scan_fn=_rsi_momentum_scan,
         backtest_fn=backtest_rsi_momentum,
+    ),
+    Strategy(
+        id="trendline_breakout_core",
+        label="Trend Line Breakout (Core)",
+        description=(
+            "Inspired by LuxAlgo's 'Market Flow Trend Lines & Liquidity' indicator "
+            "(a free but closed-source TradingView script -- this is our own "
+            "from-scratch approximation of its published description, not a copy "
+            "of its exact formula). The 'core piece': an auto trend line is fit "
+            "through the last few confirmed swing highs and projected forward; "
+            "buy when price closes up through that line. Exit at a single "
+            "ATR-based take-profit, an ATR-based stop-loss, or period end -- "
+            "whichever comes first. Meant for live intraday data (try the "
+            "15-Minute interval with a date range of 60 days or less, matching "
+            "yfinance's own limit on how far back intraday bars go), but also "
+            "runs on daily bars."
+        ),
+        params=[
+            NumberParam(
+                "pivot_lookback", "Pivot lookback (bars each side)", 5, 2, 20, step=1, is_int=True,
+                help="A bar must be the strict highest/lowest within this many bars on both sides to count as a confirmed swing point.",
+            ),
+            NumberParam(
+                "trendline_points", "Trend line points", 3, 2, 8, step=1, is_int=True,
+                help="Number of the most recent confirmed swing highs used to fit the resistance trend line.",
+            ),
+            NumberParam(
+                "atr_period", "ATR period", 14, 2, 50, step=1, is_int=True, is_sma_window=True,
+                help="Bars used to smooth the Average True Range that sizes the take-profit and stop-loss.",
+            ),
+            NumberParam(
+                "take_profit_atr_mult", "Take profit (x ATR above entry)", 2.0, 0.5, 10.0, step=0.5, is_int=False,
+                help="Exit target = entry price + this many ATRs (measured at entry).",
+            ),
+            NumberParam(
+                "stop_loss_atr_mult", "Stop loss (x ATR below entry)", 1.5, 0.5, 10.0, step=0.5, is_int=False,
+                help="Exit stop = entry price - this many ATRs (measured at entry). Checked before the take-profit on any bar that would hit both.",
+            ),
+        ],
+        scan_fn=_trendline_breakout_core_scan,
+        backtest_fn=backtest_trendline_breakout_core,
+    ),
+    Strategy(
+        id="market_flow_full",
+        label="LuxAlgo Market Flow (Full Package)",
+        description=(
+            "The 'full package' version of Trend Line Breakout (Core) -- same "
+            "trend-line breakout entry, but only taken when it also: breaks above "
+            "the day's Opening Range, is trading in a rising EMA with price above "
+            "it, is happening near a recent liquidity zone (a cluster of prior "
+            "swing highs/lows) rather than out in open air, and isn't on a day "
+            "that gapped down hard at the open. On daily data the Opening Range "
+            "can't be computed (it needs multiple bars per day), so that one "
+            "filter passes through rather than blocking every trade -- the other "
+            "three still apply. Position size is split into 3 equal legs at "
+            "entry, each targeting its own ATR-based take-profit level (matching "
+            "the real indicator's 'up to 3 ATR based take profits'), all sharing "
+            "one ATR-based stop-loss. Best used with live intraday data (try the "
+            "15-Minute interval, 60 days or less)."
+        ),
+        params=[
+            NumberParam(
+                "pivot_lookback", "Pivot lookback (bars each side)", 5, 2, 20, step=1, is_int=True,
+                help="A bar must be the strict highest/lowest within this many bars on both sides to count as a confirmed swing point.",
+            ),
+            NumberParam(
+                "trendline_points", "Trend line points", 3, 2, 8, step=1, is_int=True,
+                help="Number of the most recent confirmed swing highs used to fit the resistance trend line.",
+            ),
+            NumberParam(
+                "atr_period", "ATR period", 14, 2, 50, step=1, is_int=True, is_sma_window=True,
+                help="Bars used to smooth the Average True Range that sizes the take-profits and stop-loss.",
+            ),
+            NumberParam(
+                "ema_period", "EMA period (trend filter)", 20, 2, 100, step=1, is_int=True,
+                help="Only take a breakout when price is above a rising EMA of this length.",
+            ),
+            NumberParam(
+                "opening_range_minutes", "Opening range (minutes)", 15, 5, 60, step=5, is_int=True,
+                help="Length of the first-of-the-day window whose high must be broken. No effect on daily bars (see description).",
+            ),
+            NumberParam(
+                "liquidity_lookback_bars", "Liquidity zone lookback (bars)", 50, 10, 300, step=10, is_int=True,
+                help="How far back to look for a prior swing high/low to count as a nearby liquidity zone.",
+            ),
+            NumberParam(
+                "liquidity_proximity_atr_mult", "Liquidity zone proximity (x ATR)", 1.0, 0.1, 5.0, step=0.1, is_int=False,
+                help="How close (in ATRs) price must be to a recent swing high/low to count as 'near a liquidity zone.'",
+            ),
+            NumberParam(
+                "gap_filter_pct", "Skip entries after a gap-down of (%)", 2.0, 0.0, 10.0, step=0.5, is_int=False,
+                help="No new entries for the rest of a day that opened down this much (as a %) from the prior close. 0 disables this filter.",
+            ),
+            NumberParam(
+                "take_profit_1_atr_mult", "Take profit 1 (x ATR)", 1.0, 0.25, 10.0, step=0.25, is_int=False,
+                help="Nearest of the 3 scaled exit targets (1/3 of the position).",
+            ),
+            NumberParam(
+                "take_profit_2_atr_mult", "Take profit 2 (x ATR)", 2.0, 0.5, 15.0, step=0.25, is_int=False,
+                help="Middle of the 3 scaled exit targets (1/3 of the position). Must be greater than take profit 1.",
+            ),
+            NumberParam(
+                "take_profit_3_atr_mult", "Take profit 3 (x ATR)", 3.0, 0.75, 20.0, step=0.25, is_int=False,
+                help="Furthest of the 3 scaled exit targets (1/3 of the position). Must be greater than take profit 2.",
+            ),
+            NumberParam(
+                "stop_loss_atr_mult", "Stop loss (x ATR below entry)", 1.5, 0.5, 10.0, step=0.5, is_int=False,
+                help="Shared exit stop for all 3 legs = entry price - this many ATRs (measured at entry).",
+            ),
+        ],
+        scan_fn=_market_flow_full_scan,
+        backtest_fn=backtest_market_flow_full,
     ),
 ]
 
