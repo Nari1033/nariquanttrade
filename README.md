@@ -8,9 +8,11 @@ A small Python app with two pieces:
    SMA-50/SMA-200, detect a "Golden Cross" (or a price/SMA crossover in
    general), and backtest the SMA-crossover strategy against simple buy &
    hold. Fully unit tested (19 tests, `tests/test_engine.py`).
-2. **GUI** (`app/`) — a Streamlit app with a **Scanner** tab (find tickers
-   that just triggered a crossover) and a **Backtest** tab (pick a ticker +
-   timeframe, see strategy vs. buy & hold, trade log, equity curve).
+2. **GUI** (`app/`) — a Streamlit app with one **Backtest** tab per
+   strategy (pick a ticker + timeframe, see strategy vs. buy & hold, trade
+   log, equity curve). Each Backtest tab also has its own "tickers meeting
+   entry criteria" scanner built in -- there's no separate Scanner tab;
+   the scan lives inside whichever strategy's tab you're already on.
 
 Data can come from the free `yfinance` package (real tickers, needs
 internet), from bundled **synthetic** sample data (works instantly,
@@ -94,7 +96,8 @@ golden_cross_recent(bars, fast_window=50, slow_window=200, lookback_days=3)
 generalizes this to "price crosses above/below its own SMA-N" (e.g. price
 crossing SMA-50). `scan_universe({ticker: bars, ...}, strategy_fn=...)` runs
 any of these across many tickers and returns the ones that matched —
-this is what powers the Scanner tab.
+this is what powers the "tickers meeting entry criteria" scan embedded in
+each strategy's Backtest tab.
 
 ### Backtester
 
@@ -136,13 +139,15 @@ crossover days and P/L can be computed by hand and checked exactly).
 
 ## 2. The GUI (`app/app.py`)
 
-- **Scanner tab** — pick "Golden Cross" or "Price crosses SMA-50", a
-  lookback window, and a comma-separated ticker list; get back a table of
-  which tickers triggered.
-- **Backtest tab** — pick one ticker, a timeframe (6mo/1y/2y/5y/10y/max),
-  SMA windows, and starting capital; get back the strategy return, buy &
-  hold return, trade count, win rate, a price+SMA+signals chart, an equity
-  curve (strategy vs. buy & hold), and a trade log.
+- **One Backtest tab per strategy** — pick one ticker, a timeframe
+  (6mo/1y/2y/5y/10y/max), that strategy's own parameters, and starting
+  capital; get back the strategy return, buy & hold return, trade count,
+  win rate, a price+signals chart, an equity curve (strategy vs. buy &
+  hold), and a trade log. Each tab also has a "🔍 Tickers currently
+  meeting this strategy's entry criteria" expander -- pick a lookback
+  window and a comma-separated ticker list, get back a table of which
+  tickers triggered, reusing that same strategy's own parameters (there is
+  no separate, strategy-picking Scanner tab; this replaced it).
 - **Trending News tab** — live market news + sentiment from Alpha
   Vantage's `NEWS_SENTIMENT` API (`app/news_provider.py`), optionally
   filtered by ticker or topic: each headline shows its source, an overall
@@ -246,7 +251,7 @@ engine/                  Pure strategy/backtest logic (no UI, no I/O deps)
   backtester.py               The backtest engine (Trade, BacktestResult)
 tests/test_engine.py     19 unit tests (stdlib unittest, hand-verified math)
 app/
-  app.py                  Streamlit GUI (Scanner + Backtest tabs)
+  app.py                  Streamlit GUI (one Backtest tab per strategy, each with its own scan)
   data_provider.py          Sample/offline-data loaders + yfinance fetcher
   admin_fetch.py             Build Dataset tab -- fetches the real offline dataset
   charts.py                  Matplotlib chart builders

@@ -2,12 +2,12 @@
 
 Run with:  streamlit run app/app.py   (from the project root)
 
-Top-level layout: one "Scanner" tab (pick which strategy to scan with from
-a dropdown -- it's one page, not duplicated per strategy) plus one
-"Backtest" tab per strategy (see app/strategies.py -- add a new `Strategy`
-entry there and it gets its own backtest tab automatically, no app.py
-changes needed). Each panel uses that strategy's own scan_fn/backtest_fn
-and parameters, so results always match whichever strategy is selected.
+Top-level layout: one "Backtest" tab per strategy (see app/strategies.py --
+add a new `Strategy` entry there and it gets its own backtest tab
+automatically, no app.py changes needed). Each tab uses that strategy's own
+scan_fn/backtest_fn and parameters, so results always match whichever
+strategy the tab is for. There's no separate Scanner tab -- each Backtest
+tab embeds its own "tickers meeting entry criteria" scan.
 
 Data source is selectable in the sidebar:
   - "Sample data (offline demo)" - bundled SYNTHETIC csvs, works with zero
@@ -193,10 +193,10 @@ with st.expander("👋 New here? Here's what QuantTrade does", expanded=True):
     thumbnails = [
         (
             "🔍",
-            "Scanner",
-            "Screen a list of tickers for a strategy signal -- a golden cross, a "
-            "price/SMA break, or a bullish options setup -- over any date range "
-            "and bar interval.",
+            "Signal Scanner",
+            "Screen a list of tickers for a strategy's entry signal -- a golden "
+            "cross, a price/SMA break, or a bullish options setup -- built right "
+            "into every strategy's Backtest tab.",
         ),
         (
             "📈",
@@ -319,9 +319,8 @@ def _typed_params(strategy: Strategy, param_values: dict) -> dict:
 
 def _default_scan_tickers() -> str:
     """Comma-separated starting ticker list for a criteria scan, sized
-    sensibly per data source -- reused by both the Scanner tab and the
-    "tickers meeting criteria" block on each strategy's Backtest tab, so
-    the two don't drift out of sync."""
+    sensibly per data source -- shared by every strategy's "tickers meeting
+    criteria" block on its Backtest tab, so they don't drift out of sync."""
     if source == "sample":
         return ", ".join(list_sample_tickers())
     if source == "offline":
@@ -332,9 +331,9 @@ def _default_scan_tickers() -> str:
 def _load_universe_for_source(tickers: List[str], start, end, interval: str):
     """Load `tickers` from whichever source is selected in the sidebar,
     returning (universe, missing) -- universe is {ticker: df} for whatever
-    loaded successfully, missing is the tickers that didn't. Shared by the
-    Scanner tab and the per-strategy "tickers meeting criteria" scan so
-    both use identical per-source loading behavior."""
+    loaded successfully, missing is the tickers that didn't. Shared by every
+    per-strategy "tickers meeting criteria" scan so they all use identical
+    per-source loading behavior."""
     if source == "sample":
         universe, missing = {}, []
         for t in tickers:
@@ -361,16 +360,15 @@ def _load_universe_for_source(tickers: List[str], start, end, interval: str):
 
 def _render_criteria_scan(strategy: Strategy, key_prefix: str, typed_params: dict) -> None:
     """"Tickers currently meeting this strategy's entry criteria" block,
-    shown on the strategy's own Backtest tab so you don't have to jump to
-    the separate Scanner tab and re-pick the strategy/params -- runs the
-    same scan_fn + typed_params this page's backtest itself would use,
-    against a user-editable ticker list (button-triggered, not automatic,
-    since a Live source scan makes real API calls per ticker)."""
+    shown on the strategy's own Backtest tab -- runs the same scan_fn +
+    typed_params this page's backtest itself would use, against a
+    user-editable ticker list (button-triggered, not automatic, since a
+    Live source scan makes real API calls per ticker)."""
     with st.expander("🔍 Tickers currently meeting this strategy's entry criteria", expanded=False):
         st.caption(
-            "Runs this strategy's scan signal (same logic as the Scanner tab, using the "
-            "parameters set above) across a ticker list, using whichever data source is "
-            "selected in the sidebar."
+            "Runs this strategy's scan signal (using the parameters set above) "
+            "across a ticker list, using whichever data source is selected in the "
+            "sidebar."
         )
         offline_tickers = list_offline_tickers() if source == "offline" else []
         scan_all_offline = False
@@ -435,102 +433,6 @@ def _render_criteria_scan(strategy: Strategy, key_prefix: str, typed_params: dic
             )
         else:
             st.info(f"None of the {len(crit_universe)} ticker(s) checked currently meet entry criteria.")
-
-
-def render_scanner_panel(strategy: Strategy, key_prefix: str) -> None:
-    st.caption(strategy.description)
-
-    param_values, extra = _render_param_row(strategy.params, key_prefix=f"{key_prefix}_scan", extra_cols=1)
-    with extra[0]:
-        lookback_days = st.number_input(
-            "Signal within the last N bars",
-            min_value=1,
-            max_value=20,
-            value=3,
-            key=f"{key_prefix}_scan_lookback",
-        )
-
-    col_d, col_e, col_f = st.columns(3)
-    with col_d:
-        scan_start = st.date_input(
-            "Data start date", value=TODAY - dt.timedelta(days=730), key=f"{key_prefix}_scan_start"
-        )
-    with col_e:
-        scan_end = st.date_input("Data end date", value=TODAY, key=f"{key_prefix}_scan_end")
-    with col_f:
-        scan_interval_label = st.selectbox(
-            "Interval", list(INTERVAL_CHOICES.keys()), index=0, key=f"{key_prefix}_scan_interval"
-        )
-        scan_interval = INTERVAL_CHOICES[scan_interval_label]
-
-    ticker_input = st.text_input(
-        "Tickers to scan (comma-separated)",
-        value=_default_scan_tickers(),
-        key=f"{key_prefix}_scan_tickers",
-        help=(
-            f"{len(list_offline_tickers())} ticker(s) available offline -- showing the "
-            "first 10 as a starting point."
-            if source == "offline"
-            else None
-        ),
-    )
-
-    run_scan = st.button("Run scan", type="primary", key=f"{key_prefix}_scan_run")
-
-    if run_scan:
-        if scan_start >= scan_end:
-            st.error("Data start date must be before the data end date.")
-            return
-
-        tickers = [t.strip().upper() for t in ticker_input.split(",") if t.strip()]
-        with st.spinner(f"Loading price history for {len(tickers)} ticker(s)..."):
-            universe, missing = _load_universe_for_source(
-                tickers, start=scan_start, end=scan_end, interval=scan_interval
-            )
-
-        if missing:
-            st.warning(f"Could not load data for: {', '.join(missing)}")
-
-        if not universe:
-            st.error("No price data available for the requested tickers.")
-            return
-
-        matches = scan_universe(
-            universe,
-            strategy_fn=strategy.scan_fn,
-            lookback_days=int(lookback_days),
-            **_typed_params(strategy, param_values),
-        )
-
-        scan_key = data_range_key(None, scan_start, scan_end)
-        rows = []
-        for ticker, df in universe.items():
-            last_close = df["close"].iloc[-1] if len(df) else None
-            last_date = df.index[-1].date() if len(df) else None
-            cache_age = (
-                cache.cache_age_hours(ticker, scan_key, scan_interval)
-                if source == "yfinance"
-                else None
-            )
-            rows.append(
-                {
-                    "Ticker": ticker,
-                    "Signal triggered": "✅" if ticker in matches else "",
-                    "Last close": round(float(last_close), 2) if last_close is not None else None,
-                    "As of": str(last_date) if last_date else "",
-                    "Bars available": len(df),
-                    "Cache age (h)": round(cache_age, 1) if cache_age is not None else "",
-                }
-            )
-        result_df = pd.DataFrame(rows).sort_values("Signal triggered", ascending=False).reset_index(
-            drop=True
-        )
-        st.dataframe(result_df, use_container_width=True, hide_index=True)
-
-        if matches:
-            st.success(f"{len(matches)} ticker(s) triggered: {', '.join(matches)}")
-        else:
-            st.info("No tickers triggered the signal in the requested window.")
 
 
 def render_backtest_panel(strategy: Strategy, key_prefix: str) -> None:
@@ -1242,39 +1144,25 @@ def render_news_panel() -> None:
 
 # ---------------------------------------------------------------------------
 # One top-level tab layout:
-#   - "🔍 Scanner" -- a single page. Pick which strategy to scan with from
-#     a dropdown, then it renders that strategy's own scan params/results
-#     (each strategy still keeps its own remembered widget values, via
-#     key_prefix=strategy.id, so switching back and forth doesn't reset
-#     what you typed).
-#   - One "📈 <strategy label>" tab per strategy for its backtest, so every
-#     strategy's backtest results live on their own page instead of being
-#     nested under a strategy-specific outer tab.
+#   - One "📈 <strategy label>" tab per strategy for its backtest. Each
+#     Backtest tab also embeds its own "tickers meeting entry criteria"
+#     scan (see _render_criteria_scan above) -- there's no separate,
+#     strategy-picking Scanner tab, since that scan lives inside every
+#     strategy's own tab instead.
 #   - "🧪 Parameter Sweep" and "📰 Trending News" always sit last, in that
 #     order, after every per-strategy tab.
-# Add a new Strategy to app/strategies.py and it shows up in both places
-# automatically -- no other app.py changes needed.
+# Add a new Strategy to app/strategies.py and it shows up here (and in the
+# criteria scan) automatically -- no other app.py changes needed.
 # ---------------------------------------------------------------------------
 
-main_tab_labels = (
-    ["🔍 Scanner"]
-    + [f"📈 {s.label}" for s in STRATEGIES]
-    + ["🧪 Parameter Sweep", "📰 Trending News", "🗄️ Build Dataset"]
-)
+main_tab_labels = [f"📈 {s.label}" for s in STRATEGIES] + [
+    "🧪 Parameter Sweep",
+    "📰 Trending News",
+    "🗄️ Build Dataset",
+]
 main_tabs = st.tabs(main_tab_labels)
 
-with main_tabs[0]:
-    strategy_by_label = {s.label: s for s in STRATEGIES}
-    chosen_label = st.selectbox(
-        "Strategy to scan with",
-        list(strategy_by_label.keys()),
-        key="scanner_strategy_choice",
-        help="Each strategy has its own scan logic and parameters below.",
-    )
-    scanner_strategy = strategy_by_label[chosen_label]
-    render_scanner_panel(scanner_strategy, key_prefix=scanner_strategy.id)
-
-for strategy, backtest_tab in zip(STRATEGIES, main_tabs[1:-3]):
+for strategy, backtest_tab in zip(STRATEGIES, main_tabs[:-3]):
     with backtest_tab:
         render_backtest_panel(strategy, key_prefix=strategy.id)
 
