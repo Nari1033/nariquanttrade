@@ -602,6 +602,8 @@ def render_backtest_panel(strategy: Strategy, key_prefix: str) -> None:
     buffer_days = max(int(max_window) * _BAR_TO_CALENDAR_DAYS.get(bt_interval, 1.0) * 1.3, 5)
     fetch_start = bt_start - dt.timedelta(days=int(buffer_days) + 5)
 
+    used_offline_fallback = False
+    live_fetch_error = None
     try:
         with st.spinner(f"Loading {bt_ticker} price history..."):
             if source == "sample":
@@ -609,17 +611,39 @@ def render_backtest_panel(strategy: Strategy, key_prefix: str) -> None:
             elif source == "offline":
                 df = load_offline_ticker(bt_ticker, start=fetch_start, end=bt_end, interval=bt_interval)
             else:
-                df = fetch_yfinance_ticker(
-                    bt_ticker,
-                    start=fetch_start,
-                    end=bt_end,
-                    interval=bt_interval,
-                    max_age_hours=cache_max_age_hours,
-                    force_refresh=force_refresh,
-                )
+                try:
+                    df = fetch_yfinance_ticker(
+                        bt_ticker,
+                        start=fetch_start,
+                        end=bt_end,
+                        interval=bt_interval,
+                        max_age_hours=cache_max_age_hours,
+                        force_refresh=force_refresh,
+                    )
+                except Exception as exc:
+                    # Live data unavailable (no network, rate-limited, bad
+                    # symbol that used to be good, ...) and
+                    # fetch_yfinance_ticker already tried a stale cache
+                    # first -- fall back to the saved offline dataset
+                    # (data/historical_prices/) so the backtest can still
+                    # run instead of just failing outright. This is a
+                    # single shared code path, so it covers every
+                    # strategy's Backtest tab, not just one.
+                    try:
+                        df = load_offline_ticker(bt_ticker, start=fetch_start, end=bt_end, interval=bt_interval)
+                    except Exception:
+                        raise exc
+                    used_offline_fallback = True
+                    live_fetch_error = exc
     except Exception as exc:
         st.error(f"Couldn't load data for '{bt_ticker}': {exc}")
         return
+
+    if used_offline_fallback:
+        st.info(
+            f"ℹ️ Live data wasn't available for '{bt_ticker}' ({live_fetch_error}) -- "
+            "backtesting against the saved offline dataset instead."
+        )
 
     typed_params = _typed_params(strategy, param_values)
     try:
