@@ -87,3 +87,19 @@ def rsi(series: pd.Series, period: int = 14) -> pd.Series:
     result = result.where(~no_loss, 100.0)
     result = result.where(~(no_loss & (avg_gain == 0)), 50.0)
     return result
+
+
+def wma(series: pd.Series, period: int) -> pd.Series:
+    """Weighted Moving Average: a linearly-weighted average over the last
+    `period` observations, with the most recent observation weighted
+    heaviest (weight `period`) and the oldest weighted lightest (weight 1)
+    -- so it reacts to new data faster than a plain SMA but smoother than
+    an EMA. NaN until `period` observations are available, same warm-up
+    convention as sma()/ema()."""
+    if period < 1:
+        raise ValueError("period must be a positive integer")
+    weights = pd.Series(range(1, period + 1), dtype=float)
+    weight_sum = weights.sum()
+    return series.rolling(window=period, min_periods=period).apply(
+        lambda window: (window * weights.to_numpy()).sum() / weight_sum, raw=True
+    )

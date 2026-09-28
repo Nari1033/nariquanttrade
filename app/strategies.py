@@ -30,6 +30,7 @@ from engine.options_backtester import backtest_bull_put_spread
 from engine.cash_secured_put import backtest_cash_secured_put
 from engine.wheel import backtest_wheel_strategy
 from engine.rsi_strategy import backtest_rsi_momentum, rsi_breakout_recent
+from engine.rsi_ema_wma_strategy import backtest_rsi_ema_wma, rsi_ema_wma_bullish_recent
 from engine.luxalgo_strategy import (
     backtest_market_flow_full,
     backtest_trendline_breakout_core,
@@ -142,6 +143,16 @@ def _rsi_momentum_scan(bars, lookback_days: int = 3, **kwargs) -> bool:
         buy_threshold=float(kwargs.get("buy_threshold", 70.0)),
         overbought_threshold=float(kwargs.get("overbought_threshold", 80.0)),
         exit_threshold=float(kwargs.get("exit_threshold", 60.0)),
+        lookback_days=lookback_days,
+    )
+
+
+def _rsi_ema_wma_scan(bars, lookback_days: int = 3, **kwargs) -> bool:
+    return rsi_ema_wma_bullish_recent(
+        bars,
+        rsi_period=int(kwargs.get("rsi_period", 9)),
+        ema_period=int(kwargs.get("ema_period", 3)),
+        wma_period=int(kwargs.get("wma_period", 21)),
         lookback_days=lookback_days,
     )
 
@@ -394,6 +405,36 @@ STRATEGIES: List[Strategy] = [
         ],
         scan_fn=_rsi_momentum_scan,
         backtest_fn=backtest_rsi_momentum,
+    ),
+    Strategy(
+        id="rsi9_ema3_wma21",
+        label="RSI(9) + EMA(3) + WMA(21)",
+        description=(
+            "Three lines, all derived from the same RSI(9) series: \"Strength\" "
+            "is the raw RSI(9) value (its conventional 50 midline marks "
+            "overbought/oversold, shown for reference only). \"Price\" is a fast "
+            "EMA(3) smoothing of Strength. \"Volume\" is a slower WMA(21) "
+            "smoothing of Strength -- a lagging baseline. Buy when Strength and "
+            "Price both move above Volume; sell when both move below it. A "
+            "moving-average-crossover-style strategy (no stop loss, long-only, "
+            "no shorting)."
+        ),
+        params=[
+            NumberParam(
+                "rsi_period", "RSI period (Strength)", 9, 2, 50, step=1, is_int=True,
+                help="Number of bars used to smooth average gains/losses for the RSI (Wilder's method).",
+            ),
+            NumberParam(
+                "ema_period", "EMA period (Price)", 3, 1, 20, step=1, is_int=True,
+                help="Fast EMA smoothing period applied to the RSI series itself.",
+            ),
+            NumberParam(
+                "wma_period", "WMA period (Volume)", 21, 2, 60, step=1, is_int=True, is_sma_window=True,
+                help="Slow WMA smoothing period applied to the RSI series itself -- the baseline Strength/Price cross.",
+            ),
+        ],
+        scan_fn=_rsi_ema_wma_scan,
+        backtest_fn=backtest_rsi_ema_wma,
     ),
     Strategy(
         id="trendline_breakout_core",
