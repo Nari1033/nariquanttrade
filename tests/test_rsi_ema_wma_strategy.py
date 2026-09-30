@@ -45,9 +45,10 @@ def make_flat_bars(n=60, price=100.0, start=date(2020, 1, 1)):
 
 def make_wavy_bars(n=150, base=100.0, start=date(2020, 1, 1)):
     """A slow sine-wave-ish price path with small noise -- enough
-    oscillation in RSI to reliably cross a WMA(21) baseline multiple
-    times, without depending on a specific random seed's exact values in
-    assertions (tests below only check structural properties)."""
+    oscillation in RSI to reliably run through full bullish/bearish
+    three-line stacks multiple times, without depending on a specific
+    random seed's exact values in assertions (tests below only check
+    structural properties)."""
     import math
 
     closes = []
@@ -84,7 +85,8 @@ class TestRsiEmaWmaLines(unittest.TestCase):
     def test_flat_price_series_has_no_signals(self):
         # RSI is undefined-direction (50) the whole way on dead-flat
         # prices, so Strength/Price/Volume converge to the same value and
-        # never cleanly cross -- no buy or sell signal should ever fire.
+        # never form a strict stack either way -- no buy or sell signal
+        # should ever fire.
         bars = make_flat_bars(60)
         df = to_dataframe(bars)
         buy_signal, sell_signal, _, _, _ = rsi_ema_wma_signals(df)
@@ -93,31 +95,33 @@ class TestRsiEmaWmaLines(unittest.TestCase):
 
 
 class TestRsiEmaWmaSignals(unittest.TestCase):
-    def test_buy_signal_requires_both_lines_above(self):
+    def test_buy_signal_requires_full_bullish_stack(self):
+        # Volume < Price < Strength, strictly, on every buy bar.
         bars = make_wavy_bars(150)
         df = to_dataframe(bars)
         buy_signal, _, strength, price_line, volume_line = rsi_ema_wma_signals(df)
         for dt in df.index[buy_signal]:
-            self.assertGreater(strength.loc[dt], volume_line.loc[dt])
-            self.assertGreater(price_line.loc[dt], volume_line.loc[dt])
+            self.assertLess(volume_line.loc[dt], price_line.loc[dt])
+            self.assertLess(price_line.loc[dt], strength.loc[dt])
 
-    def test_sell_signal_requires_both_lines_below(self):
+    def test_sell_signal_requires_full_bearish_stack(self):
+        # Volume > Price > Strength, strictly, on every sell bar.
         bars = make_wavy_bars(150)
         df = to_dataframe(bars)
         _, sell_signal, strength, price_line, volume_line = rsi_ema_wma_signals(df)
         for dt in df.index[sell_signal]:
-            self.assertLess(strength.loc[dt], volume_line.loc[dt])
-            self.assertLess(price_line.loc[dt], volume_line.loc[dt])
+            self.assertGreater(volume_line.loc[dt], price_line.loc[dt])
+            self.assertGreater(price_line.loc[dt], strength.loc[dt])
 
     def test_signals_fire_once_per_transition_not_every_bar(self):
         # A signal bar's *previous* bar must not already have been in that
-        # same bullish/bearish state -- otherwise every bar of a multi-day
-        # run above/below the baseline would (wrongly) count as a signal.
+        # same bullish/bearish stack -- otherwise every bar of a multi-day
+        # run in that order would (wrongly) count as a signal.
         bars = make_wavy_bars(150)
         df = to_dataframe(bars)
         buy_signal, sell_signal, strength, price_line, volume_line = rsi_ema_wma_signals(df)
-        bullish = ((strength > volume_line).fillna(False) & (price_line > volume_line).fillna(False))
-        bearish = ((strength < volume_line).fillna(False) & (price_line < volume_line).fillna(False))
+        bullish = (volume_line < price_line).fillna(False) & (price_line < strength).fillna(False)
+        bearish = (volume_line > price_line).fillna(False) & (price_line > strength).fillna(False)
         bullish_prev = bullish.shift(1, fill_value=False)
         bearish_prev = bearish.shift(1, fill_value=False)
         self.assertFalse((buy_signal & bullish_prev).any())
@@ -167,6 +171,23 @@ class TestBacktestRsiEmaWma(unittest.TestCase):
             is_win = t.exit_price > t.entry_price
             self.assertEqual(t.is_win, is_win)
 
+    def test_trade_meta_carries_all_three_lines_at_entry_and_exit(self):
+        bars = make_wavy_bars(200)
+        result = backtest_rsi_ema_wma(bars, ticker="TEST")
+        self.assertGreater(result.total_trades, 0)
+        for t in result.trades:
+            # Entry: full bullish stack (Volume < Price < Strength).
+            self.assertLess(t.meta["entry_volume_line"], t.meta["entry_price_line"])
+            self.assertLess(t.meta["entry_price_line"], t.meta["entry_strength"])
+            if t.meta["exit_reason"] == "bearish_crossover":
+                # Exit on a real sell signal: full bearish stack.
+                self.assertGreater(t.meta["exit_volume_line"], t.meta["exit_price_line"])
+                self.assertGreater(t.meta["exit_price_line"], t.meta["exit_strength"])
+            else:
+                # period_end: just marked to market, no ordering guarantee.
+                for key in ("exit_strength", "exit_price_line", "exit_volume_line"):
+                    self.assertIsInstance(t.meta[key], float)
+
     def test_last_trade_marked_period_end_if_still_open(self):
         bars = make_wavy_bars(200)
         result = backtest_rsi_ema_wma(bars, ticker="TEST")
@@ -185,8 +206,11 @@ class TestBacktestRsiEmaWma(unittest.TestCase):
         bars = make_wavy_bars(150)
         result = backtest_rsi_ema_wma(bars, wma_period=21, ticker="TEST")
         self.assertEqual(result.strategy_name, "rsi9_ema3_wma21")
+        # Neither is a literal SMA-of-price window -- this strategy's
+        # lines live on a separate oscillator panel, not as a price-chart
+        # SMA overlay (see _rsi_ema_wma_oscillator_fn in app/strategies.py).
         self.assertIsNone(result.fast_window)
-        self.assertEqual(result.slow_window, 21)
+        self.assertIsNone(result.slow_window)
 
 
 if __name__ == "__main__":

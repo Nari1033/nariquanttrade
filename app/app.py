@@ -32,7 +32,7 @@ import pandas as pd
 import streamlit as st
 
 from app import cache
-from app.charts import plot_equity_curves, plot_price_with_signals
+from app.charts import plot_equity_curves, plot_price_with_signals, plot_rsi_ema_wma_panel
 from app.data_provider import (
     fetch_yfinance_ticker,
     fetch_yfinance_universe,
@@ -694,6 +694,20 @@ def render_backtest_panel(strategy: Strategy, key_prefix: str) -> None:
     )
     st.pyplot(fig_price, use_container_width=True)
 
+    if strategy.oscillator_fn is not None:
+        # Same warm-up-buffered-then-trimmed convention as band_fn above --
+        # computed over the full fetched df so the lines are valid from
+        # day one of the visible window.
+        full_strength, full_price_line, full_volume_line = strategy.oscillator_fn(df, typed_params)
+        fig_osc = plot_rsi_ema_wma_panel(
+            full_strength.loc[start_ts:end_ts],
+            full_price_line.loc[start_ts:end_ts],
+            full_volume_line.loc[start_ts:end_ts],
+            trades=visible_trades,
+            title=f"{bt_ticker}: Strength / Price / Volume ({strategy.label})",
+        )
+        st.pyplot(fig_osc, use_container_width=True)
+
     # Rebase both curves to the same starting capital at bt_start for a
     # fair side-by-side chart.
     equity_rebased = equity_visible / equity_visible.iloc[0] * initial_capital
@@ -712,13 +726,28 @@ def render_backtest_panel(strategy: Strategy, key_prefix: str) -> None:
         # meta["leg"] (currently just the Wheel, cycling between put and
         # call legs) gets this column; everything else doesn't.
         has_leg = any(t.meta.get("leg") for t in visible_trades)
+        # RSI(9)+EMA(3)+WMA(21) is currently the only strategy whose
+        # trades carry these three -- shows what Strength/Price/Volume
+        # actually read at the entry and exit signal, alongside the
+        # underlying's own entry/exit price above.
+        has_rsi_ema_wma_lines = any(t.meta.get("entry_strength") is not None for t in visible_trades)
         price_label = "Credit/debit" if has_strikes else "Price"
+
+        def _fmt_line(value):
+            return round(value, 1) if value is not None else ""
+
         trade_rows = [
             {
                 "Entry date": t.entry_date.date(),
                 f"Entry {price_label.lower()}": round(t.entry_price, 2),
+                "Entry Strength (RSI)": _fmt_line(t.meta.get("entry_strength")),
+                "Entry Price (EMA)": _fmt_line(t.meta.get("entry_price_line")),
+                "Entry Volume (WMA)": _fmt_line(t.meta.get("entry_volume_line")),
                 "Exit date": t.exit_date.date(),
                 f"Exit {price_label.lower()}": round(t.exit_price, 2),
+                "Exit Strength (RSI)": _fmt_line(t.meta.get("exit_strength")),
+                "Exit Price (EMA)": _fmt_line(t.meta.get("exit_price_line")),
+                "Exit Volume (WMA)": _fmt_line(t.meta.get("exit_volume_line")),
                 "Return": f"{t.return_pct:+.1f}%",
                 "Result": "Win" if t.is_win else "Loss",
                 "Leg": t.meta.get("leg", "").capitalize(),
@@ -740,6 +769,17 @@ def render_backtest_panel(strategy: Strategy, key_prefix: str) -> None:
             # options-only strike columns rather than showing a table full
             # of blank cells.
             trade_df = trade_df.drop(columns=["Short strike", "Long strike"])
+        if not has_rsi_ema_wma_lines:
+            trade_df = trade_df.drop(
+                columns=[
+                    "Entry Strength (RSI)",
+                    "Entry Price (EMA)",
+                    "Entry Volume (WMA)",
+                    "Exit Strength (RSI)",
+                    "Exit Price (EMA)",
+                    "Exit Volume (WMA)",
+                ]
+            )
         st.markdown("**Trade log**")
         st.dataframe(trade_df, use_container_width=True, hide_index=True)
 

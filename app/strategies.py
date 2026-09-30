@@ -30,7 +30,11 @@ from engine.options_backtester import backtest_bull_put_spread
 from engine.cash_secured_put import backtest_cash_secured_put
 from engine.wheel import backtest_wheel_strategy
 from engine.rsi_strategy import backtest_rsi_momentum, rsi_breakout_recent
-from engine.rsi_ema_wma_strategy import backtest_rsi_ema_wma, rsi_ema_wma_bullish_recent
+from engine.rsi_ema_wma_strategy import (
+    backtest_rsi_ema_wma,
+    rsi_ema_wma_bullish_recent,
+    rsi_ema_wma_lines,
+)
 from engine.luxalgo_strategy import (
     backtest_market_flow_full,
     backtest_trendline_breakout_core,
@@ -77,6 +81,12 @@ class Strategy:
     built around a band concept (e.g. Bollinger Bands). None for every
     strategy that doesn't have one; app.py only draws the overlay when a
     strategy provides it, so this needs no changes elsewhere to add."""
+    oscillator_fn: Optional[Callable[[pd.DataFrame, Dict[str, Any]], Tuple[pd.Series, pd.Series, pd.Series]]] = None
+    """Optional: given (df, typed_params), returns three Series to plot on
+    their own panel below the price chart (not overlaid on it -- for a
+    strategy whose signal lines live on a different scale than price,
+    e.g. the RSI(9)+EMA(3)+WMA(21) strategy's 0-100 RSI-derived lines).
+    None for every strategy that doesn't have one."""
 
 
 def _price_cross_sma_scan(bars, **kwargs) -> bool:
@@ -154,6 +164,17 @@ def _rsi_ema_wma_scan(bars, lookback_days: int = 3, **kwargs) -> bool:
         ema_period=int(kwargs.get("ema_period", 3)),
         wma_period=int(kwargs.get("wma_period", 21)),
         lookback_days=lookback_days,
+    )
+
+
+def _rsi_ema_wma_oscillator_fn(
+    df: pd.DataFrame, params: Dict[str, Any]
+) -> Tuple[pd.Series, pd.Series, pd.Series]:
+    return rsi_ema_wma_lines(
+        df,
+        rsi_period=int(params.get("rsi_period", 9)),
+        ema_period=int(params.get("ema_period", 3)),
+        wma_period=int(params.get("wma_period", 21)),
     )
 
 
@@ -414,10 +435,11 @@ STRATEGIES: List[Strategy] = [
             "is the raw RSI(9) value (its conventional 50 midline marks "
             "overbought/oversold, shown for reference only). \"Price\" is a fast "
             "EMA(3) smoothing of Strength. \"Volume\" is a slower WMA(21) "
-            "smoothing of Strength -- a lagging baseline. Buy when Strength and "
-            "Price both move above Volume; sell when both move below it. A "
-            "moving-average-crossover-style strategy (no stop loss, long-only, "
-            "no shorting)."
+            "smoothing of Strength -- a lagging baseline. Buy when the three "
+            "lines stack Volume < Price < Strength (WMA below EMA, EMA below "
+            "RSI); sell when they stack the other way, Volume > Price > "
+            "Strength. A moving-average-crossover-style strategy (no stop "
+            "loss, long-only, no shorting)."
         ),
         params=[
             NumberParam(
@@ -435,6 +457,7 @@ STRATEGIES: List[Strategy] = [
         ],
         scan_fn=_rsi_ema_wma_scan,
         backtest_fn=backtest_rsi_ema_wma,
+        oscillator_fn=_rsi_ema_wma_oscillator_fn,
     ),
     Strategy(
         id="trendline_breakout_core",

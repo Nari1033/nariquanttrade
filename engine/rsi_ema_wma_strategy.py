@@ -11,20 +11,22 @@ Strategy registration in app/strategies.py for how this was confirmed):
   - "Price" (green): a fast EMA(ema_period) smoothing of the Strength
     line -- reacts quickly to changes in RSI.
   - "Volume" (red): a slower WMA(wma_period) smoothing of the Strength
-    line -- a lagging baseline the fast line crosses.
+    line -- a lagging baseline.
 
 All three live on the same 0-100 RSI scale, so "above/below" is a direct
 numeric comparison, not a normalized/rescaled one.
 
-  - Buy signal: the bar where BOTH Strength and Price first move above
-    Volume (a fresh transition into that state while flat -- not every
-    bar the condition holds, same "fires once, not continuously"
-    convention as every crossover-style strategy in this app).
-  - Sell/exit signal: the mirror -- the bar where BOTH Strength and Price
-    first move below Volume, while a position is open.
-  - Bars where Strength and Price disagree about which side of Volume
-    they're on are a "mixed" state: no new signal fires, and an existing
-    position (or flat state) simply continues.
+  - Buy signal: the bar where the three lines first stack into full
+    bullish alignment -- Volume < Price < Strength (the slow line lowest,
+    the fast line in the middle, the raw RSI highest) -- a fresh
+    transition into that exact ordering while flat, not every bar it
+    holds (same "fires once, not continuously" convention as every
+    crossover-style strategy in this app).
+  - Sell/exit signal: the mirror full bearish alignment -- Volume > Price
+    > Strength -- while a position is open.
+  - Any other ordering (the three lines not fully stacked either way) is
+    a "mixed" state: no new signal fires, and an existing position (or
+    flat state) simply continues.
 
 Long-only, like every other strategy in this app (no shorting), and no
 stop-loss -- this is a moving-average-crossover-style strategy (mirroring
@@ -68,24 +70,25 @@ def rsi_ema_wma_signals(
 ) -> Tuple[pd.Series, pd.Series, pd.Series, pd.Series, pd.Series]:
     """Returns (buy_signal, sell_signal, strength, price_line, volume_line).
 
-    buy_signal: True on the bar where Strength and Price are both above
-    Volume, but at least one of them wasn't on the previous bar (a fresh
-    transition into the "both above" state). sell_signal is the mirror
-    for "both below." Both are False during warm-up (NaN comparisons)."""
+    buy_signal: True on the bar where Volume < Price < Strength (full
+    bullish stack), but the lines weren't already in that exact order on
+    the previous bar (a fresh transition). sell_signal is the mirror for
+    Volume > Price > Strength. Both are False during warm-up (NaN
+    comparisons)."""
     strength, price_line, volume_line = rsi_ema_wma_lines(
         df, rsi_period=rsi_period, ema_period=ema_period, wma_period=wma_period
     )
 
-    strength_above = (strength > volume_line).fillna(False)
-    price_above = (price_line > volume_line).fillna(False)
-    strength_below = (strength < volume_line).fillna(False)
-    price_below = (price_line < volume_line).fillna(False)
+    volume_below_price = (volume_line < price_line).fillna(False)
+    price_below_strength = (price_line < strength).fillna(False)
+    volume_above_price = (volume_line > price_line).fillna(False)
+    price_above_strength = (price_line > strength).fillna(False)
 
-    bullish = strength_above & price_above
-    bearish = strength_below & price_below
+    bullish_stack = volume_below_price & price_below_strength
+    bearish_stack = volume_above_price & price_above_strength
 
-    buy_signal = bullish & ~bullish.shift(1, fill_value=False)
-    sell_signal = bearish & ~bearish.shift(1, fill_value=False)
+    buy_signal = bullish_stack & ~bullish_stack.shift(1, fill_value=False)
+    sell_signal = bearish_stack & ~bearish_stack.shift(1, fill_value=False)
     return buy_signal, sell_signal, strength, price_line, volume_line
 
 
@@ -118,13 +121,20 @@ def backtest_rsi_ema_wma(
 ) -> BacktestResult:
     """Long/flat backtest for the RSI(9)+EMA(3)+WMA(21) crossover.
 
-    Buy at the close on a buy_signal bar (Strength & Price both freshly
-    above Volume) while flat. Sell at the close on a sell_signal bar
-    (Strength & Price both freshly below Volume) while holding. A
-    position still open when the data runs out is marked to market on the
-    final bar (exit_reason "period_end"), same convention as every other
-    backtester here. Buy-and-hold is computed over the full supplied
-    period.
+    Buy at the close on a buy_signal bar (Volume < Price < Strength,
+    freshly) while flat. Sell at the close on a sell_signal bar (Volume >
+    Price > Strength, freshly) while holding. A position still open when
+    the data runs out is marked to market on the final bar (exit_reason
+    "period_end"), same convention as every other backtester here.
+    Buy-and-hold is computed over the full supplied period.
+
+    Each Trade's `entry_price`/`exit_price` are the underlying's actual
+    close price (what return_pct/is_win are computed from, like every
+    other strategy here) -- the three indicator readings at entry and
+    exit are carried separately in `meta` (`entry_strength`,
+    `entry_price_line`, `entry_volume_line`, and the `exit_`-prefixed
+    equivalents) purely for display, e.g. a trade table that wants to
+    show what the lines actually read at the signal.
 
     Raises ValueError if there isn't enough data to compute all three
     lines.
@@ -137,7 +147,7 @@ def backtest_rsi_ema_wma(
             f"(RSI period={rsi_period} + WMA period={wma_period})"
         )
 
-    buy_signal, sell_signal, _, _, _ = rsi_ema_wma_signals(
+    buy_signal, sell_signal, strength, price_line, volume_line = rsi_ema_wma_signals(
         df, rsi_period=rsi_period, ema_period=ema_period, wma_period=wma_period
     )
 
@@ -145,6 +155,7 @@ def backtest_rsi_ema_wma(
     in_position = False
     entry_date: Optional[pd.Timestamp] = None
     entry_price: Optional[float] = None
+    entry_lines = {}
     shares_held = 0.0
     equity = initial_capital
     equity_curve = pd.Series(index=df.index, dtype=float)
@@ -176,13 +187,22 @@ def backtest_rsi_ema_wma(
                         return_pct=trade_return * 100,
                         is_win=trade_return > 0,
                         closed_at_period_end=(exit_reason == "period_end"),
-                        meta={"exit_reason": exit_reason},
+                        meta={
+                            "exit_reason": exit_reason,
+                            "entry_strength": entry_lines.get("strength"),
+                            "entry_price_line": entry_lines.get("price_line"),
+                            "entry_volume_line": entry_lines.get("volume_line"),
+                            "exit_strength": float(strength.iloc[i]),
+                            "exit_price_line": float(price_line.iloc[i]),
+                            "exit_volume_line": float(volume_line.iloc[i]),
+                        },
                     )
                 )
                 in_position = False
                 shares_held = 0.0
                 entry_date = None
                 entry_price = None
+                entry_lines = {}
                 exited_this_bar = True
 
         if not in_position and not exited_this_bar and bool(buy_signal.iloc[i]) and i != last_i:
@@ -190,6 +210,11 @@ def backtest_rsi_ema_wma(
             entry_date = dt
             entry_price = close
             shares_held = equity / entry_price
+            entry_lines = {
+                "strength": float(strength.iloc[i]),
+                "price_line": float(price_line.iloc[i]),
+                "volume_line": float(volume_line.iloc[i]),
+            }
 
         equity_curve.iloc[i] = shares_held * close if in_position else equity
 
@@ -209,7 +234,12 @@ def backtest_rsi_ema_wma(
         start_date=df.index[0],
         end_date=df.index[-1],
         fast_window=None,
-        slow_window=wma_period,
+        # None, not wma_period -- this strategy's signal lives on a
+        # separate RSI/EMA/WMA oscillator panel (see
+        # app.strategies._rsi_ema_wma_oscillator_fn), not as an SMA-of-
+        # price overlay on the price chart, so there's no literal
+        # "sma_{window}" price line for plot_price_with_signals to draw.
+        slow_window=None,
         initial_capital=initial_capital,
         strategy_return_pct=strategy_return_pct,
         buy_hold_return_pct=buy_hold_return_pct,

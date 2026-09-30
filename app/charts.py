@@ -85,3 +85,40 @@ def plot_equity_curves(
     ax.grid(alpha=0.25)
     fig.tight_layout()
     return fig
+
+
+def plot_rsi_ema_wma_panel(
+    strength: pd.Series,
+    price_line: pd.Series,
+    volume_line: pd.Series,
+    trades: Optional[List[Trade]] = None,
+    title: str = "",
+):
+    """The RSI(9)+EMA(3)+WMA(21) strategy's own panel: three lines on a
+    shared 0-100 RSI scale (Strength=RSI black, Price=EMA-of-RSI green,
+    Volume=WMA-of-RSI red), with a dashed 50 reference line and buy/sell
+    markers placed on the Strength line at each trade's entry/exit date.
+    Separate from plot_price_with_signals -- these lines are never on the
+    price chart's dollar scale, so they get their own subplot rather than
+    a band/SMA-style overlay."""
+    fig, ax = plt.subplots(figsize=(10, 3.2))
+    ax.plot(strength.index, strength, label="Strength (RSI 9)", color="black", linewidth=1.2)
+    ax.plot(price_line.index, price_line, label="Price (EMA 3)", color="#2ca02c", linewidth=1.2)
+    ax.plot(volume_line.index, volume_line, label="Volume (WMA 21)", color="#d62728", linewidth=1.2)
+    ax.axhline(50, color="gray", linewidth=0.8, linestyle="--", alpha=0.6)
+    ax.set_ylim(0, 100)
+
+    if trades:
+        entry_dates = [t.entry_date for t in trades if t.entry_date in strength.index]
+        entry_vals = [strength.loc[t.entry_date] for t in trades if t.entry_date in strength.index]
+        exit_dates = [t.exit_date for t in trades if t.exit_date in strength.index]
+        exit_vals = [strength.loc[t.exit_date] for t in trades if t.exit_date in strength.index]
+        ax.scatter(entry_dates, entry_vals, marker="^", color="green", s=80, zorder=5, label="Buy")
+        ax.scatter(exit_dates, exit_vals, marker="v", color="red", s=80, zorder=5, label="Sell")
+
+    ax.set_title(title)
+    ax.set_ylabel("RSI")
+    ax.legend(loc="upper left", fontsize=8)
+    ax.grid(alpha=0.25)
+    fig.tight_layout()
+    return fig
