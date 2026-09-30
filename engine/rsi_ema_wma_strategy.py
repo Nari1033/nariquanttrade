@@ -5,28 +5,32 @@ price or volume directly, despite the line names below -- see the
 Strategy registration in app/strategies.py for how this was confirmed):
 
   - "Strength" (black): the raw RSI(rsi_period) value, in [0, 100]. Its
-    conventional 50 midline (above = strength, below = weakness) is shown
-    on the chart as a reference level but does not itself drive the
-    buy/sell rule below.
+    conventional 50 midline (above = strength, below = weakness) *does*
+    drive the buy/sell rule below, in addition to being shown as a chart
+    reference level.
   - "Price" (green): a fast EMA(ema_period) smoothing of the Strength
     line -- reacts quickly to changes in RSI.
   - "Volume" (red): a slower WMA(wma_period) smoothing of the Strength
     line -- a lagging baseline.
 
-All three live on the same 0-100 RSI scale, so "above/below" is a direct
-numeric comparison, not a normalized/rescaled one.
+All three live on the same 0-100 RSI scale, so "above/below"/"diff" are
+direct numeric comparisons, not normalized/rescaled ones.
 
-  - Buy signal: the bar where the three lines first stack into full
-    bullish alignment -- Volume < Price < Strength (the slow line lowest,
-    the fast line in the middle, the raw RSI highest) -- a fresh
-    transition into that exact ordering while flat, not every bar it
-    holds (same "fires once, not continuously" convention as every
-    crossover-style strategy in this app).
-  - Sell/exit signal: the mirror full bearish alignment -- Volume > Price
-    > Strength -- while a position is open.
-  - Any other ordering (the three lines not fully stacked either way) is
-    a "mixed" state: no new signal fires, and an existing position (or
-    flat state) simply continues.
+  - Buy signal: ALL of the following, first true on this bar but not the
+    previous one (a fresh transition while flat, not every bar it holds
+    -- same "fires once, not continuously" convention as every
+    crossover-style strategy in this app):
+      1. Full bullish stack: Volume < Price < Strength.
+      2. Strength (RSI) is above 50.
+      3. Strength is at least `min_gap` points above Volume (a *shallow*
+         Strength-over-Volume gap right at the 50 line doesn't count,
+         even if 1 and 2 both technically hold).
+  - Sell/exit signal: the mirror -- Volume > Price > Strength, Strength
+    below 50, and Volume at least `min_gap` points above Strength --
+    while a position is open.
+  - Anything short of all three conditions on a side is a "mixed" state:
+    no new signal fires, and an existing position (or flat state) simply
+    continues.
 
 Long-only, like every other strategy in this app (no shorting), and no
 stop-loss -- this is a moving-average-crossover-style strategy (mirroring
@@ -67,14 +71,22 @@ def rsi_ema_wma_signals(
     rsi_period: int = 9,
     ema_period: int = 3,
     wma_period: int = 21,
+    min_gap: float = 5.0,
 ) -> Tuple[pd.Series, pd.Series, pd.Series, pd.Series, pd.Series]:
     """Returns (buy_signal, sell_signal, strength, price_line, volume_line).
 
     buy_signal: True on the bar where Volume < Price < Strength (full
-    bullish stack), but the lines weren't already in that exact order on
-    the previous bar (a fresh transition). sell_signal is the mirror for
-    Volume > Price > Strength. Both are False during warm-up (NaN
-    comparisons)."""
+    bullish stack), Strength > 50, and Strength - Volume >= min_gap --
+    but not already all true on the previous bar (a fresh transition).
+    sell_signal is the mirror: Volume > Price > Strength, Strength < 50,
+    and Volume - Strength >= min_gap. Both are False during warm-up (NaN
+    comparisons).
+
+    Raises ValueError if min_gap is negative.
+    """
+    if min_gap < 0:
+        raise ValueError("min_gap must not be negative")
+
     strength, price_line, volume_line = rsi_ema_wma_lines(
         df, rsi_period=rsi_period, ema_period=ema_period, wma_period=wma_period
     )
@@ -87,8 +99,17 @@ def rsi_ema_wma_signals(
     bullish_stack = volume_below_price & price_below_strength
     bearish_stack = volume_above_price & price_above_strength
 
-    buy_signal = bullish_stack & ~bullish_stack.shift(1, fill_value=False)
-    sell_signal = bearish_stack & ~bearish_stack.shift(1, fill_value=False)
+    strength_above_mid = (strength > 50.0).fillna(False)
+    strength_below_mid = (strength < 50.0).fillna(False)
+
+    bullish_gap = ((strength - volume_line) >= min_gap).fillna(False)
+    bearish_gap = ((volume_line - strength) >= min_gap).fillna(False)
+
+    bullish_full = bullish_stack & strength_above_mid & bullish_gap
+    bearish_full = bearish_stack & strength_below_mid & bearish_gap
+
+    buy_signal = bullish_full & ~bullish_full.shift(1, fill_value=False)
+    sell_signal = bearish_full & ~bearish_full.shift(1, fill_value=False)
     return buy_signal, sell_signal, strength, price_line, volume_line
 
 
@@ -97,6 +118,7 @@ def rsi_ema_wma_bullish_recent(
     rsi_period: int = 9,
     ema_period: int = 3,
     wma_period: int = 21,
+    min_gap: float = 5.0,
     lookback_days: int = 3,
 ) -> bool:
     """True if a buy signal fired within the last `lookback_days` bars.
@@ -106,7 +128,7 @@ def rsi_ema_wma_bullish_recent(
     if len(df) < min_bars:
         return False
     buy_signal, _, _, _, _ = rsi_ema_wma_signals(
-        df, rsi_period=rsi_period, ema_period=ema_period, wma_period=wma_period
+        df, rsi_period=rsi_period, ema_period=ema_period, wma_period=wma_period, min_gap=min_gap
     )
     return bool(buy_signal.iloc[-lookback_days:].any())
 
@@ -116,17 +138,20 @@ def backtest_rsi_ema_wma(
     rsi_period: int = 9,
     ema_period: int = 3,
     wma_period: int = 21,
+    min_gap: float = 5.0,
     initial_capital: float = 10_000.0,
     ticker: Optional[str] = None,
 ) -> BacktestResult:
     """Long/flat backtest for the RSI(9)+EMA(3)+WMA(21) crossover.
 
     Buy at the close on a buy_signal bar (Volume < Price < Strength,
-    freshly) while flat. Sell at the close on a sell_signal bar (Volume >
-    Price > Strength, freshly) while holding. A position still open when
-    the data runs out is marked to market on the final bar (exit_reason
-    "period_end"), same convention as every other backtester here.
-    Buy-and-hold is computed over the full supplied period.
+    Strength > 50, Strength - Volume >= min_gap, all freshly true) while
+    flat. Sell at the close on a sell_signal bar (the mirror: Volume >
+    Price > Strength, Strength < 50, Volume - Strength >= min_gap) while
+    holding. A position still open when the data runs out is marked to
+    market on the final bar (exit_reason "period_end"), same convention
+    as every other backtester here. Buy-and-hold is computed over the
+    full supplied period.
 
     Each Trade's `entry_price`/`exit_price` are the underlying's actual
     close price (what return_pct/is_win are computed from, like every
@@ -137,7 +162,7 @@ def backtest_rsi_ema_wma(
     show what the lines actually read at the signal.
 
     Raises ValueError if there isn't enough data to compute all three
-    lines.
+    lines, or if min_gap is negative.
     """
     df = to_dataframe(bars)
     min_bars = rsi_period + wma_period + 2
@@ -148,7 +173,7 @@ def backtest_rsi_ema_wma(
         )
 
     buy_signal, sell_signal, strength, price_line, volume_line = rsi_ema_wma_signals(
-        df, rsi_period=rsi_period, ema_period=ema_period, wma_period=wma_period
+        df, rsi_period=rsi_period, ema_period=ema_period, wma_period=wma_period, min_gap=min_gap
     )
 
     trades: List[Trade] = []

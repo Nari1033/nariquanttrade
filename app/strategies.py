@@ -163,6 +163,7 @@ def _rsi_ema_wma_scan(bars, lookback_days: int = 3, **kwargs) -> bool:
         rsi_period=int(kwargs.get("rsi_period", 9)),
         ema_period=int(kwargs.get("ema_period", 3)),
         wma_period=int(kwargs.get("wma_period", 21)),
+        min_gap=float(kwargs.get("min_gap", 5.0)),
         lookback_days=lookback_days,
     )
 
@@ -433,13 +434,15 @@ STRATEGIES: List[Strategy] = [
         description=(
             "Three lines, all derived from the same RSI(9) series: \"Strength\" "
             "is the raw RSI(9) value (its conventional 50 midline marks "
-            "overbought/oversold, shown for reference only). \"Price\" is a fast "
-            "EMA(3) smoothing of Strength. \"Volume\" is a slower WMA(21) "
-            "smoothing of Strength -- a lagging baseline. Buy when the three "
-            "lines stack Volume < Price < Strength (WMA below EMA, EMA below "
-            "RSI); sell when they stack the other way, Volume > Price > "
-            "Strength. A moving-average-crossover-style strategy (no stop "
-            "loss, long-only, no shorting)."
+            "overbought/oversold). \"Price\" is a fast EMA(3) smoothing of "
+            "Strength. \"Volume\" is a slower WMA(21) smoothing of Strength -- "
+            "a lagging baseline. Buy when the three lines stack Volume < Price "
+            "< Strength (WMA below EMA, EMA below RSI), Strength is above 50, "
+            "and Strength leads Volume by at least the minimum gap; sell when "
+            "they stack the other way (Volume > Price > Strength), Strength is "
+            "below 50, and Volume leads Strength by at least the minimum gap. "
+            "A moving-average-crossover-style strategy (no stop loss, "
+            "long-only, no shorting)."
         ),
         params=[
             NumberParam(
@@ -453,6 +456,10 @@ STRATEGIES: List[Strategy] = [
             NumberParam(
                 "wma_period", "WMA period (Volume)", 21, 2, 60, step=1, is_int=True, is_sma_window=True,
                 help="Slow WMA smoothing period applied to the RSI series itself -- the baseline Strength/Price cross.",
+            ),
+            NumberParam(
+                "min_gap", "Min RSI-WMA gap", 5.0, 0.0, 50.0, step=1.0, is_int=False,
+                help="Minimum required gap between Strength (RSI) and Volume (WMA) -- buy needs Strength - Volume >= this, sell needs Volume - Strength >= this. 0 disables the gap filter.",
             ),
         ],
         scan_fn=_rsi_ema_wma_scan,

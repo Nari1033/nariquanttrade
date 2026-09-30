@@ -46,9 +46,9 @@ def make_flat_bars(n=60, price=100.0, start=date(2020, 1, 1)):
 def make_wavy_bars(n=150, base=100.0, start=date(2020, 1, 1)):
     """A slow sine-wave-ish price path with small noise -- enough
     oscillation in RSI to reliably run through full bullish/bearish
-    three-line stacks multiple times, without depending on a specific
-    random seed's exact values in assertions (tests below only check
-    structural properties)."""
+    three-line stacks (and past the 50 line with a wide margin) multiple
+    times, without depending on a specific random seed's exact values in
+    assertions (tests below only check structural properties)."""
     import math
 
     closes = []
@@ -84,9 +84,9 @@ class TestRsiEmaWmaLines(unittest.TestCase):
 
     def test_flat_price_series_has_no_signals(self):
         # RSI is undefined-direction (50) the whole way on dead-flat
-        # prices, so Strength/Price/Volume converge to the same value and
-        # never form a strict stack either way -- no buy or sell signal
-        # should ever fire.
+        # prices, so Strength/Price/Volume converge to the same value,
+        # never form a strict stack, and never clear a positive min_gap
+        # either -- no buy or sell signal should ever fire.
         bars = make_flat_bars(60)
         df = to_dataframe(bars)
         buy_signal, sell_signal, _, _, _ = rsi_ema_wma_signals(df)
@@ -95,35 +95,66 @@ class TestRsiEmaWmaLines(unittest.TestCase):
 
 
 class TestRsiEmaWmaSignals(unittest.TestCase):
-    def test_buy_signal_requires_full_bullish_stack(self):
-        # Volume < Price < Strength, strictly, on every buy bar.
+    def test_buy_signal_requires_full_bullish_stack_above_50_with_gap(self):
         bars = make_wavy_bars(150)
         df = to_dataframe(bars)
-        buy_signal, _, strength, price_line, volume_line = rsi_ema_wma_signals(df)
+        buy_signal, _, strength, price_line, volume_line = rsi_ema_wma_signals(df, min_gap=5.0)
         for dt in df.index[buy_signal]:
             self.assertLess(volume_line.loc[dt], price_line.loc[dt])
             self.assertLess(price_line.loc[dt], strength.loc[dt])
+            self.assertGreater(strength.loc[dt], 50.0)
+            self.assertGreaterEqual(strength.loc[dt] - volume_line.loc[dt], 5.0)
 
-    def test_sell_signal_requires_full_bearish_stack(self):
-        # Volume > Price > Strength, strictly, on every sell bar.
+    def test_sell_signal_requires_full_bearish_stack_below_50_with_gap(self):
         bars = make_wavy_bars(150)
         df = to_dataframe(bars)
-        _, sell_signal, strength, price_line, volume_line = rsi_ema_wma_signals(df)
+        _, sell_signal, strength, price_line, volume_line = rsi_ema_wma_signals(df, min_gap=5.0)
         for dt in df.index[sell_signal]:
             self.assertGreater(volume_line.loc[dt], price_line.loc[dt])
             self.assertGreater(price_line.loc[dt], strength.loc[dt])
+            self.assertLess(strength.loc[dt], 50.0)
+            self.assertGreaterEqual(volume_line.loc[dt] - strength.loc[dt], 5.0)
 
-    def test_signals_fire_once_per_transition_not_every_bar(self):
-        # A signal bar's *previous* bar must not already have been in that
-        # same bullish/bearish stack -- otherwise every bar of a multi-day
-        # run in that order would (wrongly) count as a signal.
+    def test_larger_min_gap_never_adds_signals(self):
+        # Tightening min_gap can only drop signals, never add new ones --
+        # every bar that qualifies at a wider gap must also qualify at a
+        # narrower one.
         bars = make_wavy_bars(150)
         df = to_dataframe(bars)
-        buy_signal, sell_signal, strength, price_line, volume_line = rsi_ema_wma_signals(df)
-        bullish = (volume_line < price_line).fillna(False) & (price_line < strength).fillna(False)
-        bearish = (volume_line > price_line).fillna(False) & (price_line > strength).fillna(False)
-        bullish_prev = bullish.shift(1, fill_value=False)
-        bearish_prev = bearish.shift(1, fill_value=False)
+        buy_loose, sell_loose, _, _, _ = rsi_ema_wma_signals(df, min_gap=1.0)
+        buy_tight, sell_tight, _, _, _ = rsi_ema_wma_signals(df, min_gap=15.0)
+        self.assertTrue((buy_loose.sum() >= buy_tight.sum()))
+        self.assertTrue((sell_loose.sum() >= sell_tight.sum()))
+        self.assertFalse((buy_tight & ~buy_loose).any())
+        self.assertFalse((sell_tight & ~sell_loose).any())
+
+    def test_negative_min_gap_raises(self):
+        bars = make_wavy_bars(60)
+        df = to_dataframe(bars)
+        with self.assertRaises(ValueError):
+            rsi_ema_wma_signals(df, min_gap=-1.0)
+
+    def test_signals_fire_once_per_transition_not_every_bar(self):
+        # A signal bar's *previous* bar must not already have satisfied
+        # every buy/sell condition -- otherwise every bar of a multi-day
+        # run in that state would (wrongly) count as a signal.
+        bars = make_wavy_bars(150)
+        df = to_dataframe(bars)
+        buy_signal, sell_signal, strength, price_line, volume_line = rsi_ema_wma_signals(df, min_gap=5.0)
+        bullish_full = (
+            (volume_line < price_line).fillna(False)
+            & (price_line < strength).fillna(False)
+            & (strength > 50.0).fillna(False)
+            & ((strength - volume_line) >= 5.0).fillna(False)
+        )
+        bearish_full = (
+            (volume_line > price_line).fillna(False)
+            & (price_line > strength).fillna(False)
+            & (strength < 50.0).fillna(False)
+            & ((volume_line - strength) >= 5.0).fillna(False)
+        )
+        bullish_prev = bullish_full.shift(1, fill_value=False)
+        bearish_prev = bearish_full.shift(1, fill_value=False)
         self.assertFalse((buy_signal & bullish_prev).any())
         self.assertFalse((sell_signal & bearish_prev).any())
 
@@ -146,9 +177,9 @@ class TestRsiEmaWmaBullishRecent(unittest.TestCase):
     def test_matches_signals_lookback_window(self):
         bars = make_wavy_bars(150)
         df = to_dataframe(bars)
-        buy_signal, _, _, _, _ = rsi_ema_wma_signals(df)
+        buy_signal, _, _, _, _ = rsi_ema_wma_signals(df, min_gap=5.0)
         expected = bool(buy_signal.iloc[-3:].any())
-        self.assertEqual(rsi_ema_wma_bullish_recent(bars, lookback_days=3), expected)
+        self.assertEqual(rsi_ema_wma_bullish_recent(bars, lookback_days=3, min_gap=5.0), expected)
 
 
 class TestBacktestRsiEmaWma(unittest.TestCase):
@@ -176,17 +207,29 @@ class TestBacktestRsiEmaWma(unittest.TestCase):
         result = backtest_rsi_ema_wma(bars, ticker="TEST")
         self.assertGreater(result.total_trades, 0)
         for t in result.trades:
-            # Entry: full bullish stack (Volume < Price < Strength).
+            # Entry: full bullish stack, above 50, gapped by >= 5.
             self.assertLess(t.meta["entry_volume_line"], t.meta["entry_price_line"])
             self.assertLess(t.meta["entry_price_line"], t.meta["entry_strength"])
+            self.assertGreater(t.meta["entry_strength"], 50.0)
+            self.assertGreaterEqual(t.meta["entry_strength"] - t.meta["entry_volume_line"], 5.0)
             if t.meta["exit_reason"] == "bearish_crossover":
-                # Exit on a real sell signal: full bearish stack.
+                # Exit on a real sell signal: full bearish stack, below 50, gapped.
                 self.assertGreater(t.meta["exit_volume_line"], t.meta["exit_price_line"])
                 self.assertGreater(t.meta["exit_price_line"], t.meta["exit_strength"])
+                self.assertLess(t.meta["exit_strength"], 50.0)
+                self.assertGreaterEqual(t.meta["exit_volume_line"] - t.meta["exit_strength"], 5.0)
             else:
                 # period_end: just marked to market, no ordering guarantee.
                 for key in ("exit_strength", "exit_price_line", "exit_volume_line"):
                     self.assertIsInstance(t.meta[key], float)
+
+    def test_min_gap_is_a_real_parameter(self):
+        # A much larger min_gap on the same data should never produce more
+        # trades than a smaller one (each buy needs to clear a wider bar).
+        bars = make_wavy_bars(200)
+        loose = backtest_rsi_ema_wma(bars, min_gap=1.0, ticker="TEST")
+        tight = backtest_rsi_ema_wma(bars, min_gap=25.0, ticker="TEST")
+        self.assertGreaterEqual(loose.total_trades, tight.total_trades)
 
     def test_last_trade_marked_period_end_if_still_open(self):
         bars = make_wavy_bars(200)
