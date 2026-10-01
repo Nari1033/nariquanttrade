@@ -168,6 +168,69 @@ class TestRsiEmaWmaSignals(unittest.TestCase):
         self.assertFalse(buy_signal[warmup_slice].any())
         self.assertFalse(sell_signal[warmup_slice].any())
 
+    def test_default_buy_sell_rsi_levels_are_50_50(self):
+        # The 50/50 default must behave exactly like the old hardcoded-50
+        # logic -- not raise, and match passing 50.0/50.0 explicitly.
+        bars = make_wavy_bars(150)
+        df = to_dataframe(bars)
+        default_buy, default_sell, *_ = rsi_ema_wma_signals(df, min_gap=5.0)
+        explicit_buy, explicit_sell, *_ = rsi_ema_wma_signals(
+            df, min_gap=5.0, buy_rsi_level=50.0, sell_rsi_level=50.0
+        )
+        self.assertTrue(default_buy.equals(explicit_buy))
+        self.assertTrue(default_sell.equals(explicit_sell))
+
+    def test_buy_signal_respects_custom_buy_rsi_level(self):
+        bars = make_wavy_bars(150)
+        df = to_dataframe(bars)
+        buy_signal, _, strength, _, _ = rsi_ema_wma_signals(
+            df, min_gap=0.0, buy_rsi_level=65.0, sell_rsi_level=50.0
+        )
+        for dt in df.index[buy_signal]:
+            self.assertGreater(strength.loc[dt], 65.0)
+
+    def test_sell_signal_respects_custom_sell_rsi_level(self):
+        bars = make_wavy_bars(150)
+        df = to_dataframe(bars)
+        _, sell_signal, strength, _, _ = rsi_ema_wma_signals(
+            df, min_gap=0.0, buy_rsi_level=50.0, sell_rsi_level=35.0
+        )
+        for dt in df.index[sell_signal]:
+            self.assertLess(strength.loc[dt], 35.0)
+
+    def test_stricter_buy_rsi_level_shrinks_the_qualifying_bars(self):
+        # Raising buy_rsi_level can only shrink the *set of bars* where
+        # the full bullish condition holds (pointwise, bar by bar) --
+        # every bar that clears the stricter level must also clear the
+        # looser one. (Note: this is about the underlying condition, not
+        # buy_signal itself -- buy_signal is edge-triggered on the first
+        # bar of each qualifying stretch, so a later-starting stretch
+        # under the stricter level can fire its signal on a bar the
+        # looser level doesn't, even though its total qualifying-bar set
+        # is still a subset.)
+        bars = make_wavy_bars(150)
+        df = to_dataframe(bars)
+        strength, price_line, volume_line = rsi_ema_wma_lines(
+            df, rsi_period=9, ema_period=3, wma_period=21
+        )
+        bullish_stack = (volume_line < price_line).fillna(False) & (price_line < strength).fillna(False)
+        loose_full = bullish_stack & (strength > 30.0).fillna(False)
+        strict_full = bullish_stack & (strength > 70.0).fillna(False)
+        self.assertGreaterEqual(loose_full.sum(), strict_full.sum())
+        self.assertFalse((strict_full & ~loose_full).any())
+
+    def test_buy_rsi_level_need_not_exceed_sell_rsi_level(self):
+        # No ordering is enforced between the two levels -- the stacking
+        # condition alone already keeps buy_signal and sell_signal
+        # mutually exclusive, so an "inverted" pair (buy below sell)
+        # should run without raising.
+        bars = make_wavy_bars(60)
+        df = to_dataframe(bars)
+        buy_signal, sell_signal, *_ = rsi_ema_wma_signals(
+            df, buy_rsi_level=30.0, sell_rsi_level=70.0
+        )
+        self.assertFalse((buy_signal & sell_signal).any())
+
 
 class TestRsiEmaWmaBullishRecent(unittest.TestCase):
     def test_false_when_not_enough_bars(self):
@@ -180,6 +243,16 @@ class TestRsiEmaWmaBullishRecent(unittest.TestCase):
         buy_signal, _, _, _, _ = rsi_ema_wma_signals(df, min_gap=5.0)
         expected = bool(buy_signal.iloc[-3:].any())
         self.assertEqual(rsi_ema_wma_bullish_recent(bars, lookback_days=3, min_gap=5.0), expected)
+
+    def test_custom_buy_rsi_level_threads_through(self):
+        bars = make_wavy_bars(150)
+        df = to_dataframe(bars)
+        buy_signal, _, _, _, _ = rsi_ema_wma_signals(df, min_gap=0.0, buy_rsi_level=80.0)
+        expected = bool(buy_signal.iloc[-3:].any())
+        self.assertEqual(
+            rsi_ema_wma_bullish_recent(bars, lookback_days=3, min_gap=0.0, buy_rsi_level=80.0),
+            expected,
+        )
 
 
 class TestBacktestRsiEmaWma(unittest.TestCase):
@@ -244,6 +317,16 @@ class TestBacktestRsiEmaWma(unittest.TestCase):
         result = backtest_rsi_ema_wma(bars, initial_capital=10_000.0, ticker="FLAT")
         self.assertEqual(result.total_trades, 0)
         self.assertTrue((result.equity_curve == 10_000.0).all())
+
+    def test_custom_buy_sell_rsi_levels_affect_trade_entries(self):
+        bars = make_wavy_bars(200)
+        result = backtest_rsi_ema_wma(
+            bars, min_gap=0.0, buy_rsi_level=65.0, sell_rsi_level=35.0, ticker="TEST"
+        )
+        for t in result.trades:
+            self.assertGreater(t.meta["entry_strength"], 65.0)
+            if t.meta["exit_reason"] == "bearish_crossover":
+                self.assertLess(t.meta["exit_strength"], 35.0)
 
     def test_strategy_name_and_window_metadata(self):
         bars = make_wavy_bars(150)

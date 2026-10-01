@@ -164,6 +164,8 @@ def _rsi_ema_wma_scan(bars, lookback_days: int = 3, **kwargs) -> bool:
         ema_period=int(kwargs.get("ema_period", 3)),
         wma_period=int(kwargs.get("wma_period", 21)),
         min_gap=float(kwargs.get("min_gap", 5.0)),
+        buy_rsi_level=float(kwargs.get("buy_rsi_level", 50.0)),
+        sell_rsi_level=float(kwargs.get("sell_rsi_level", 50.0)),
         lookback_days=lookback_days,
     )
 
@@ -433,14 +435,15 @@ STRATEGIES: List[Strategy] = [
         label="RSI(9) + EMA(3) + WMA(21)",
         description=(
             "Three lines, all derived from the same RSI(9) series: \"Strength\" "
-            "is the raw RSI(9) value (its conventional 50 midline marks "
-            "overbought/oversold). \"Price\" is a fast EMA(3) smoothing of "
+            "is the raw RSI(9) value. \"Price\" is a fast EMA(3) smoothing of "
             "Strength. \"Volume\" is a slower WMA(21) smoothing of Strength -- "
             "a lagging baseline. Buy when the three lines stack Volume < Price "
-            "< Strength (WMA below EMA, EMA below RSI), Strength is above 50, "
-            "and Strength leads Volume by at least the minimum gap; sell when "
-            "they stack the other way (Volume > Price > Strength), Strength is "
-            "below 50, and Volume leads Strength by at least the minimum gap. "
+            "< Strength (WMA below EMA, EMA below RSI), Strength is above the "
+            "buy RSI level, and Strength leads Volume by at least the minimum "
+            "gap; sell when they stack the other way (Volume > Price > "
+            "Strength), Strength is below the sell RSI level, and Volume leads "
+            "Strength by at least the minimum gap. Buy/sell RSI levels default "
+            "to the conventional 50 midline but are independently adjustable. "
             "A moving-average-crossover-style strategy (no stop loss, "
             "long-only, no shorting)."
         ),
@@ -460,6 +463,14 @@ STRATEGIES: List[Strategy] = [
             NumberParam(
                 "min_gap", "Min RSI-WMA gap", 5.0, 0.0, 50.0, step=1.0, is_int=False,
                 help="Minimum required gap between Strength (RSI) and Volume (WMA) -- buy needs Strength - Volume >= this, sell needs Volume - Strength >= this. 0 disables the gap filter.",
+            ),
+            NumberParam(
+                "buy_rsi_level", "Buy RSI level", 50.0, 1.0, 99.0, step=1.0, is_int=False,
+                help="Strength (RSI) must be above this level for a buy signal. Defaults to the conventional 50 midline; raise it to require a more decisively bullish RSI before buying.",
+            ),
+            NumberParam(
+                "sell_rsi_level", "Sell RSI level", 50.0, 1.0, 99.0, step=1.0, is_int=False,
+                help="Strength (RSI) must be below this level for a sell signal. Defaults to the conventional 50 midline; lower it to require a more decisively bearish RSI before selling.",
             ),
         ],
         scan_fn=_rsi_ema_wma_scan,
