@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 
@@ -58,12 +59,41 @@ def atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
     return true_range.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean()
 
 
+def _wilder_smooth(values: pd.Series, period: int) -> pd.Series:
+    """Wilder's original smoothing, the textbook convention behind RSI's
+    average gain/loss: seed with a plain simple average of the first
+    `period` valid values, then from there weight the running average
+    (period-1)/period against 1/period for each new value -- i.e.
+    avg[t] = (avg[t-1] * (period - 1) + values[t]) / period.
+
+    This differs from a plain EMA (alpha=1/period, decaying from the very
+    first raw observation) only in how the first value is seeded, but
+    that seed matters: an EMA-seeded-from-bar-0 series takes dozens of
+    bars to converge to the same numbers this produces immediately after
+    warm-up, which is why Wilder's original RSI/ATR figures (and most
+    trading platforms) use this seeding rather than a plain EMA. NaN
+    until `period` valid (non-NaN) values have been seen.
+    """
+    arr = values.to_numpy(dtype=float)
+    out = np.full(arr.shape, np.nan)
+    valid = ~np.isnan(arr)
+    if valid.any():
+        first_valid = int(np.argmax(valid))
+        seed_end = first_valid + period  # exclusive end of the seed window
+        if seed_end <= len(arr):
+            out[seed_end - 1] = arr[first_valid:seed_end].mean()
+            for i in range(seed_end, len(arr)):
+                out[i] = (out[i - 1] * (period - 1) + arr[i]) / period
+    return pd.Series(out, index=values.index)
+
+
 def rsi(series: pd.Series, period: int = 14) -> pd.Series:
-    """Relative Strength Index, using Wilder's original smoothing (an
-    exponential moving average with alpha=1/period applied to gains and
-    losses separately) -- the standard RSI definition. NaN for the first
-    `period` bars while the smoothing warms up, a value in [0, 100] after
-    that.
+    """Relative Strength Index, using Wilder's original smoothing (see
+    _wilder_smooth) applied to gains and losses separately -- the
+    standard, textbook RSI definition, matching TradingView and most
+    trading platforms bar-for-bar (not just asymptotically). NaN for the
+    first `period` bars while the smoothing warms up, a value in [0, 100]
+    after that.
 
     Edge cases in the average-loss-is-zero region (a stretch with no down
     bars at all within the smoothing window):
@@ -77,8 +107,8 @@ def rsi(series: pd.Series, period: int = 14) -> pd.Series:
     delta = series.diff()
     gain = delta.clip(lower=0.0)
     loss = -delta.clip(upper=0.0)
-    avg_gain = gain.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean()
+    avg_gain = _wilder_smooth(gain, period)
+    avg_loss = _wilder_smooth(loss, period)
 
     rs = avg_gain / avg_loss
     result = 100.0 - (100.0 / (1.0 + rs))

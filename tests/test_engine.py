@@ -165,6 +165,78 @@ class TestRSI(unittest.TestCase):
         self.assertTrue((result <= 100).all())
         self.assertGreater(result.max() - result.min(), 10)
 
+    def test_matches_wilder_sma_seeded_recursion(self):
+        # rsi() must match the textbook Wilder convention -- the first
+        # average gain/loss is a plain simple average of the first
+        # `period` values, and every value after that is
+        # avg[t] = (avg[t-1] * (period - 1) + new[t]) / period -- not a
+        # plain EMA decaying from the very first raw observation (which
+        # converges to the same numbers only after dozens of bars). This
+        # is what makes the result match TradingView/most platforms
+        # bar-for-bar, not just asymptotically.
+        import random
+
+        random.seed(0)
+        prices = [100.0]
+        for _ in range(119):
+            prices.append(prices[-1] + random.uniform(-2.0, 2.0))
+        s = pd.Series(prices)
+        period = 9
+
+        delta = s.diff()
+        gain = delta.clip(lower=0.0)
+        loss = -delta.clip(upper=0.0)
+        expected_avg_gain = [float("nan")] * len(s)
+        expected_avg_loss = [float("nan")] * len(s)
+        expected_avg_gain[period] = gain.iloc[1 : period + 1].mean()
+        expected_avg_loss[period] = loss.iloc[1 : period + 1].mean()
+        for t in range(period + 1, len(s)):
+            expected_avg_gain[t] = (
+                expected_avg_gain[t - 1] * (period - 1) + gain.iloc[t]
+            ) / period
+            expected_avg_loss[t] = (
+                expected_avg_loss[t - 1] * (period - 1) + loss.iloc[t]
+            ) / period
+        expected_rs = pd.Series(expected_avg_gain) / pd.Series(expected_avg_loss)
+        expected = 100.0 - (100.0 / (1.0 + expected_rs))
+
+        result = rsi(s, period=period)
+        valid = result.notna() & expected.notna()
+        self.assertTrue(valid.sum() > 50)  # sanity: actually compared something
+        for got, want in zip(result[valid], expected[valid]):
+            self.assertAlmostEqual(got, want, places=9)
+
+    def test_seeding_matters_not_just_asymptotic_convergence(self):
+        # Regression guard: a plain EMA(alpha=1/period) seeded from bar 0
+        # would NOT match Wilder's SMA-seeded recursion for a while after
+        # warm-up (that was the bug) -- assert our actual output diverges
+        # measurably from that wrong convention right after warm-up, to
+        # make sure a future change can't silently revert to it.
+        import random
+
+        random.seed(1)
+        prices = [100.0]
+        for _ in range(59):
+            prices.append(prices[-1] + random.uniform(-2.0, 2.0))
+        s = pd.Series(prices)
+        period = 9
+
+        wrong_ema = s.diff()
+        gain = wrong_ema.clip(lower=0.0)
+        loss = -wrong_ema.clip(upper=0.0)
+        wrong_avg_gain = gain.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean()
+        wrong_avg_loss = loss.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean()
+        wrong_rs = wrong_avg_gain / wrong_avg_loss
+        wrong_result = 100.0 - (100.0 / (1.0 + wrong_rs))
+
+        result = rsi(s, period=period)
+        first_valid_idx = result.first_valid_index()
+        # Right at warm-up, the two seeding conventions should disagree by
+        # a non-trivial amount -- if this ever goes to ~0, the fix has
+        # likely been reverted to the plain-EMA seeding.
+        diff_at_warmup = abs(result.loc[first_valid_idx] - wrong_result.loc[first_valid_idx])
+        self.assertGreater(diff_at_warmup, 0.001)
+
 
 class TestCrossoverAndScanner(unittest.TestCase):
     def test_crossover_series_detects_golden_and_death_cross(self):
