@@ -18,6 +18,7 @@ from engine.bollinger import (
     bollinger_signals,
 )
 from engine.data_utils import to_dataframe
+from engine.indicators import atr as atr_indicator
 from engine.models import PriceBar
 
 
@@ -83,15 +84,12 @@ class TestBollingerBands(unittest.TestCase):
 
 
 class TestBollingerSignals(unittest.TestCase):
-    # NOTE: these deliberately do NOT use a flat/constant baseline plus one
-    # outlier bar. The band for bar i is computed from a *window ending at
-    # bar i*, so a single outlier's own close is part of the mean/stdev
-    # that its own "did it close back inside" check is measured against --
-    # against a perfectly flat baseline that self-reference algebraically
-    # cancels out and a same-bar reversal can never satisfy the signal for
-    # any realistic num_std. A naturally varying baseline (as in any real
-    # price series) doesn't have that degenerate cancellation, so these
-    # tests use an oscillating series, like the backtester tests below.
+    # These signals are a two-bar reversal pattern at each band, not a
+    # same-bar wick touch: the "signal candle" closes beyond a band, and
+    # the signal only fires on the NEXT bar, if (and only if) that next
+    # bar's close reverts back inside. Both bars' bands are evaluated at
+    # their own index (a rolling window ending at that bar), matching how
+    # the strategy itself evaluates it bar by bar.
 
     def setUp(self):
         self.bars = make_oscillating_series(n=200, mid=100.0, amplitude=10.0, period=20)
@@ -100,27 +98,27 @@ class TestBollingerSignals(unittest.TestCase):
         _, self.upper, self.lower = bollinger_bands(self.df["close"], window=20, num_std=1.0)
 
     def test_signals_fire_on_an_oscillating_series(self):
-        self.assertTrue(self.buy_signal.any(), "expected at least one lower-band rejection")
-        self.assertTrue(self.sell_signal.any(), "expected at least one upper-band rejection")
+        self.assertTrue(self.buy_signal.any(), "expected at least one lower-band reversal")
+        self.assertTrue(self.sell_signal.any(), "expected at least one upper-band reversal")
 
     def test_every_buy_signal_satisfies_its_own_definition(self):
         for i in range(len(self.df)):
             if bool(self.buy_signal.iloc[i]):
-                self.assertLessEqual(self.df["low"].iloc[i], self.lower.iloc[i])
+                # The PREVIOUS bar (the signal candle) closed below ITS OWN
+                # band, and THIS bar's close reverts back above its own band.
+                self.assertLess(self.df["close"].iloc[i - 1], self.lower.iloc[i - 1])
                 self.assertGreater(self.df["close"].iloc[i], self.lower.iloc[i])
 
     def test_every_sell_signal_satisfies_its_own_definition(self):
         for i in range(len(self.df)):
             if bool(self.sell_signal.iloc[i]):
-                self.assertGreaterEqual(self.df["high"].iloc[i], self.upper.iloc[i])
+                self.assertGreater(self.df["close"].iloc[i - 1], self.upper.iloc[i - 1])
                 self.assertLess(self.df["close"].iloc[i], self.upper.iloc[i])
 
     def test_close_beyond_band_does_not_trigger_reversion_signal(self):
-        # Price pierces AND closes below the lower band (no reversion) --
-        # should NOT count as a buy signal, since it never closed back
-        # inside. A big, sustained plunge onto an oscillating baseline
-        # guarantees the final close is (still) below whatever the lower
-        # band has become.
+        # Price pierces AND closes below the lower band, then keeps sliding
+        # -- it never closes back inside, so the final bar should NOT count
+        # as a buy signal even though the prior bar closed below the band.
         rows = [(c, c, c, c) for c in [self.df["close"].iloc[i] for i in range(30)]]
         price = rows[-1][0]
         for _ in range(10):
@@ -168,8 +166,8 @@ class TestBollingerBacktester(unittest.TestCase):
             backtest_bollinger_mean_reversion(make_flat_bars(n=10), window=20)
 
     def test_flat_price_never_trades(self):
-        # Zero-width bands on constant price -> low/high never strictly
-        # pierce them -> no signals -> no trades -> strategy flat at 0%.
+        # Zero-width bands on constant price -> close never strictly closes
+        # beyond them -> no signals -> no trades -> strategy flat at 0%.
         bars = make_flat_bars(n=60, price=100.0)
         result = backtest_bollinger_mean_reversion(bars, window=20, ticker="FLAT")
         self.assertEqual(result.total_trades, 0)
@@ -178,18 +176,39 @@ class TestBollingerBacktester(unittest.TestCase):
     def test_oscillating_series_produces_round_trip_trades_with_wins(self):
         bars = make_oscillating_series(n=200, mid=100.0, amplitude=10.0, period=20)
         result = backtest_bollinger_mean_reversion(
-            bars, window=20, num_std=1.0, stop_loss_pct=50.0, ticker="OSC"
+            bars, window=20, num_std=1.0, atr_period=14, atr_multiple=1.0, ticker="OSC"
         )
         self.assertGreater(result.total_trades, 0)
         self.assertGreater(sum(1 for t in result.trades if t.is_win), 0)
         for t in result.trades:
-            self.assertIn(t.meta.get("exit_reason"), ("band_rejection", "stop_loss", "period_end"))
+            self.assertIn(
+                t.meta.get("exit_reason"),
+                ("profit_target", "band_rejection", "stop_loss", "period_end"),
+            )
 
-    def test_stop_loss_bounds_the_loss_on_a_sustained_decline(self):
+    def test_profit_target_exit_matches_middle_band_not_close(self):
+        # The profit target is a limit-style order against the middle band
+        # -- a winning trade should exit AT the band level, not at
+        # whatever the bar's close happened to be.
+        bars = make_oscillating_series(n=200, mid=100.0, amplitude=10.0, period=20)
+        df = to_dataframe(bars)
+        result = backtest_bollinger_mean_reversion(
+            bars, window=20, num_std=1.0, atr_period=14, atr_multiple=1.0, ticker="OSC"
+        )
+        target_trades = [t for t in result.trades if t.meta.get("exit_reason") == "profit_target"]
+        self.assertGreater(len(target_trades), 0, "expected at least one profit-target exit")
+        middle, _, _ = bollinger_bands(df["close"], window=20, num_std=1.0)
+        for t in target_trades:
+            exit_i = df.index.get_loc(t.exit_date)
+            self.assertAlmostEqual(t.exit_price, middle.iloc[exit_i], places=6)
+
+    def test_stop_loss_is_anchored_to_the_signal_candle_not_the_entry_bar(self):
         # Splice a relentless decline right after the first real buy
-        # signal in an oscillating series -- the stop-loss must cap the
-        # loss near -stop_loss_pct, not let it ride down to the eventual
-        # period-end mark.
+        # signal in an oscillating series -- the stop-loss must fire and
+        # must sit exactly `atr_multiple` ATRs below the *signal candle's*
+        # low (the oversold bar one before entry), not the entry bar's own
+        # low, and not let the loss ride down to the eventual period-end
+        # mark.
         warmup_bars = make_oscillating_series(n=100, mid=100.0, amplitude=10.0, period=20)
         warmup_df = to_dataframe(warmup_bars)
         first_hit = _first_buy_signal_index(warmup_df, window=20, num_std=1.0)
@@ -203,15 +222,54 @@ class TestBollingerBacktester(unittest.TestCase):
             price *= 0.97
             rows.append((price, price, price, price))
         bars = make_bars(rows)
+        df = to_dataframe(bars)
 
+        atr_period, atr_multiple = 14, 1.0
         result = backtest_bollinger_mean_reversion(
-            bars, window=20, num_std=1.0, stop_loss_pct=10.0, ticker="DROP"
+            bars, window=20, num_std=1.0, atr_period=atr_period, atr_multiple=atr_multiple, ticker="DROP"
         )
         self.assertEqual(result.total_trades, 1)
         t = result.trades[0]
         self.assertEqual(t.meta.get("exit_reason"), "stop_loss")
         self.assertLess(t.return_pct, 0)
-        self.assertGreaterEqual(t.return_pct, -10.0 - 1e-6)
+
+        atr_series = atr_indicator(df, period=atr_period)
+        signal_candle_low = df["low"].iloc[first_hit - 1]
+        signal_candle_atr = atr_series.iloc[first_hit - 1]
+        entry_bar_low = df["low"].iloc[first_hit]
+        # Sanity check the test actually discriminates between the two
+        # anchors -- if these happened to coincide, matching the formula
+        # below wouldn't prove which bar it was anchored to.
+        self.assertNotAlmostEqual(signal_candle_low, entry_bar_low, places=2)
+
+        expected_stop = signal_candle_low - atr_multiple * signal_candle_atr
+        self.assertAlmostEqual(t.exit_price, expected_stop, places=6)
+        self.assertAlmostEqual(t.meta.get("stop_price"), round(expected_stop, 2), places=2)
+
+    def test_sell_signal_while_flat_does_not_open_a_short(self):
+        # This app is long-only: the upper-band reversal ("short entry" in
+        # the original rule set) must be a no-op while there's no open
+        # position, never a new (short) trade. Truncate the series to end
+        # right after the first sell_signal, but before any buy_signal has
+        # ever fired, and confirm nothing was ever opened.
+        bars = make_oscillating_series(n=200, mid=100.0, amplitude=10.0, period=20)
+        df = to_dataframe(bars)
+        buy_signal, sell_signal = bollinger_signals(df, window=20, num_std=1.0)
+        sell_hits = sell_signal[sell_signal].index
+        self.assertGreater(len(sell_hits), 0)
+        first_sell_i = df.index.get_loc(sell_hits[0])
+        buy_hits = buy_signal[buy_signal].index
+        first_buy_i = df.index.get_loc(buy_hits[0]) if len(buy_hits) else None
+        self.assertTrue(
+            first_buy_i is None or first_sell_i < first_buy_i,
+            "test setup requires a sell signal to occur before any buy signal",
+        )
+
+        truncated = bars[: first_sell_i + 1]
+        result = backtest_bollinger_mean_reversion(
+            truncated, window=20, num_std=1.0, atr_period=14, atr_multiple=1.0, ticker="FLATSHORT"
+        )
+        self.assertEqual(result.total_trades, 0)
 
     def test_win_rate_and_trade_count_are_internally_consistent(self):
         bars = make_oscillating_series(n=200, mid=100.0, amplitude=10.0, period=25)

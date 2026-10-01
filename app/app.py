@@ -731,6 +731,10 @@ def render_backtest_panel(strategy: Strategy, key_prefix: str) -> None:
         # actually read at the entry and exit signal, alongside the
         # underlying's own entry/exit price above.
         has_rsi_ema_wma_lines = any(t.meta.get("entry_strength") is not None for t in visible_trades)
+        # Bollinger's ATR-based stop-loss level, fixed at entry -- useful
+        # alongside "Exit reason" to see how close a stop-out came, or
+        # how far price had to run to reach it.
+        has_stop_price = any(t.meta.get("stop_price") is not None for t in visible_trades)
         price_label = "Credit/debit" if has_strikes else "Price"
 
         def _fmt_line(value):
@@ -752,6 +756,7 @@ def render_backtest_panel(strategy: Strategy, key_prefix: str) -> None:
                 "Result": "Win" if t.is_win else "Loss",
                 "Leg": t.meta.get("leg", "").capitalize(),
                 "Exit reason": t.meta.get("exit_reason", ""),
+                "Stop price": _fmt_line(t.meta.get("stop_price")),
                 "Short strike": t.meta.get("short_strike", ""),
                 "Long strike": t.meta.get("long_strike", ""),
                 "Entered before window": "Yes" if t.entry_date < start_ts else "",
@@ -764,6 +769,8 @@ def render_backtest_panel(strategy: Strategy, key_prefix: str) -> None:
             trade_df = trade_df.drop(columns=["Leg"])
         if not has_exit_reason:
             trade_df = trade_df.drop(columns=["Exit reason"])
+        if not has_stop_price:
+            trade_df = trade_df.drop(columns=["Stop price"])
         if not has_strikes:
             # No strikes to show for non-options strategies -- drop the
             # options-only strike columns rather than showing a table full

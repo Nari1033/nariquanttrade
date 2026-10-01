@@ -97,8 +97,8 @@ def _price_cross_sma_scan(bars, **kwargs) -> bool:
 
 def _bollinger_scan(bars, lookback_days: int = 3, **kwargs) -> bool:
     # Only the band window/width matter for "is there a fresh oversold
-    # signal to scan for" -- stop_loss_pct only matters once a backtest is
-    # actually managing an open position.
+    # signal to scan for" -- atr_period/atr_multiple only matter once a
+    # backtest is actually managing an open position's stop-loss.
     return bollinger_oversold_recent(
         bars,
         window=int(kwargs.get("window", 20)),
@@ -238,24 +238,33 @@ STRATEGIES: List[Strategy] = [
         id="bollinger_mean_reversion",
         label="Bollinger Band Mean Reversion",
         description=(
-            "Prices tend to revert to their average after hitting an extreme. Buy "
-            "when price dips below (or touches) the lower band and closes back "
-            "inside; sell when it spikes above (or touches) the upper band and "
-            "closes back inside. A stop loss is included since a strong trend can "
-            "make price hug a band instead of reverting."
+            "A two-bar reversal pattern at the bands, not a same-bar wick touch. "
+            "Long entry: a bar closes below the lower band (oversold), then the "
+            "next bar closes back inside -- entered at that bar's close. Profit "
+            "target: the middle band (the SMA). Stop-loss: placed beyond the "
+            "signal candle's low by a multiple of ATR, not a flat percentage. "
+            "The mirror pattern at the upper band (a bar closes above it, then "
+            "the next closes back inside) exits the position instead of opening "
+            "a short, since this app is long-only. A strong, persistent trend "
+            "can still make price 'walk the band' instead of reverting -- the "
+            "stop-loss is the safety net for that."
         ),
         params=[
             NumberParam(
                 "window", "Band window", 20, 5, 100, step=1, is_int=True, is_sma_window=True,
-                help="Bars used for the middle band (SMA) and the rolling standard deviation.",
+                help="Bars used for the middle band (SMA, also the profit target) and the rolling standard deviation.",
             ),
             NumberParam(
                 "num_std", "Band width (std devs)", 2.0, 1.0, 4.0, step=0.25, is_int=False,
                 help="Upper/lower bands sit this many standard deviations from the middle band.",
             ),
             NumberParam(
-                "stop_loss_pct", "Stop loss (% below entry)", 10.0, 1.0, 50.0, step=1.0, is_int=False,
-                help="Close the position if price falls this far below the entry price, even without a sell signal.",
+                "atr_period", "ATR period", 14, 2, 50, step=1, is_int=True, is_sma_window=True,
+                help="Bars used to smooth the Average True Range that sets the stop-loss distance.",
+            ),
+            NumberParam(
+                "atr_multiple", "Stop-loss ATR multiple", 1.0, 0.25, 5.0, step=0.25, is_int=False,
+                help="Stop-loss sits this many ATRs beyond the signal candle's low (the oversold bar that triggered entry, not the entry bar itself).",
             ),
         ],
         scan_fn=_bollinger_scan,

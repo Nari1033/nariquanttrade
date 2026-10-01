@@ -24,8 +24,7 @@ exit:
   - Stop-loss: closes the position early if price falls hard against it
     before the rollover exit condition is ever met -- RSI can stay
     elevated (or the position can just be wrong) while price keeps
-    sliding, so this is the same risk-management fallback
-    engine.bollinger uses (stop_loss_pct).
+    sliding (stop_loss_pct).
 
 Long-only, like every other strategy in this app (no shorting). See
 engine.indicators.rsi for the RSI calculation itself (Wilder's smoothing).
