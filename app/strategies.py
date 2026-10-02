@@ -43,6 +43,11 @@ from engine.luxalgo_strategy import (
     trendline_breakout_recent,
 )
 from engine.scanner import golden_cross_recent, price_cross_sma_recent
+from engine.ema_high_low import (
+    backtest_ema_high_low,
+    ema_high_low_lines,
+    ema_high_low_recent,
+)
 
 
 @dataclass
@@ -94,6 +99,39 @@ def _price_cross_sma_scan(bars, **kwargs) -> bool:
     # Pin direction="above" -- "price crosses below its SMA" would be a
     # natural *second* strategy entry later, not a toggle on this one.
     return price_cross_sma_recent(bars, direction="above", **kwargs)
+
+
+def _ema_high_low_scan(bars, lookback_days: int = 3, **kwargs) -> bool:
+    # Pin day_minus_1_filter=False -- the EMA34+DAY-1 variant is its own
+    # Strategy entry below, not a toggle on this one.
+    return ema_high_low_recent(
+        bars,
+        ema_period=int(kwargs.get("ema_period", 34)),
+        day_minus_1_filter=False,
+        lookback_days=lookback_days,
+    )
+
+
+def _ema_high_low_day_minus_1_scan(bars, lookback_days: int = 3, **kwargs) -> bool:
+    return ema_high_low_recent(
+        bars,
+        ema_period=int(kwargs.get("ema_period", 34)),
+        day_minus_1_filter=True,
+        lookback_days=lookback_days,
+    )
+
+
+def _ema_high_low_band_fn(df: pd.DataFrame, params: Dict[str, Any]) -> Tuple[pd.Series, pd.Series]:
+    ema_high, ema_low, _ema_close = ema_high_low_lines(df, ema_period=int(params.get("ema_period", 34)))
+    return ema_high, ema_low
+
+
+def _backtest_ema_high_low(bars, **kwargs) -> BacktestResult:
+    return backtest_ema_high_low(bars, day_minus_1_filter=False, **kwargs)
+
+
+def _backtest_ema_high_low_day_minus_1(bars, **kwargs) -> BacktestResult:
+    return backtest_ema_high_low(bars, day_minus_1_filter=True, **kwargs)
 
 
 def _bollinger_scan(bars, lookback_days: int = 3, **kwargs) -> bool:
@@ -661,6 +699,52 @@ STRATEGIES: List[Strategy] = [
         ],
         scan_fn=_market_flow_full_scan,
         backtest_fn=backtest_market_flow_full,
+    ),
+    Strategy(
+        id="ema34_high_low",
+        label="34 EMA High/Low (breakout channel)",
+        description=(
+            "Three 34-period EMAs -- one each on High, Low, and Close -- where "
+            "the High and Low EMAs form a dynamic channel. Stop-and-reverse, not "
+            "long/flat: go long when the close breaks up through the upper "
+            "(High) EMA; go short when it breaks down through the lower (Low) "
+            "EMA. Once triggered, the strategy is always long or short, "
+            "flipping directly from one to the other on the opposite breakout -- "
+            "this app's only strategy that shorts. Short-selling uses the same "
+            "simplified, fully-invested notional sizing as every long position "
+            "here (no margin interest, borrow cost, fees, or slippage)."
+        ),
+        params=[
+            NumberParam(
+                "ema_period", "EMA period", 34, 5, 100, step=1, is_int=True, is_sma_window=True,
+                help="Bars used for all three EMAs (High, Low, and Close).",
+            ),
+        ],
+        scan_fn=_ema_high_low_scan,
+        backtest_fn=_backtest_ema_high_low,
+        band_fn=_ema_high_low_band_fn,
+    ),
+    Strategy(
+        id="ema34_high_low_day_minus_1",
+        label="34 EMA High/Low + DAY-1 filter",
+        description=(
+            "Same breakout channel as '34 EMA High/Low', plus one gate: which "
+            "direction can even trigger today depends on yesterday's candle "
+            "color. Yesterday green (close > open) -> only a long entry can "
+            "fire today, no new shorts. Yesterday red (close < open) -> only a "
+            "short entry can fire today, no new longs. Yesterday a doji (close "
+            "== open) -> neither can fire today. This only gates new "
+            "entries/reversals -- it never forces an exit on its own."
+        ),
+        params=[
+            NumberParam(
+                "ema_period", "EMA period", 34, 5, 100, step=1, is_int=True, is_sma_window=True,
+                help="Bars used for all three EMAs (High, Low, and Close).",
+            ),
+        ],
+        scan_fn=_ema_high_low_day_minus_1_scan,
+        backtest_fn=_backtest_ema_high_low_day_minus_1,
+        band_fn=_ema_high_low_band_fn,
     ),
 ]
 
