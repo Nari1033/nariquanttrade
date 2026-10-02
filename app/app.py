@@ -403,43 +403,60 @@ def _render_criteria_scan(strategy: Strategy, key_prefix: str, typed_params: dic
             )
         run_crit_scan = st.button("Scan", key=f"{key_prefix}_crit_run")
 
-        if not run_crit_scan:
-            return
+        crit_state_key = f"{key_prefix}_crit_state"
 
-        crit_tickers = (
-            offline_tickers
-            if scan_all_offline
-            else [t.strip().upper() for t in crit_ticker_input.split(",") if t.strip()]
-        )
-        if not crit_tickers:
-            st.warning("Enter at least one ticker.")
-            return
-
-        with st.spinner(f"Checking {len(crit_tickers)} ticker(s)..."):
-            crit_universe, crit_missing = _load_universe_for_source(
-                crit_tickers, start=TODAY - dt.timedelta(days=730), end=TODAY, interval="1d"
+        def _run_and_cache_scan() -> None:
+            crit_tickers = (
+                offline_tickers
+                if scan_all_offline
+                else [t.strip().upper() for t in crit_ticker_input.split(",") if t.strip()]
             )
+            if not crit_tickers:
+                st.warning("Enter at least one ticker.")
+                return
+
+            with st.spinner(f"Checking {len(crit_tickers)} ticker(s)..."):
+                crit_universe, crit_missing = _load_universe_for_source(
+                    crit_tickers, start=TODAY - dt.timedelta(days=730), end=TODAY, interval="1d"
+                )
+
+            if not crit_universe:
+                st.error("No price data available for the requested tickers.")
+                return
+
+            crit_matches = scan_universe(
+                crit_universe,
+                strategy_fn=strategy.scan_fn,
+                lookback_days=int(crit_lookback_days),
+                **typed_params,
+            )
+            st.session_state[crit_state_key] = {
+                "crit_matches": crit_matches,
+                "crit_universe_len": len(crit_universe),
+                "crit_missing": crit_missing,
+            }
+
+        if run_crit_scan:
+            _run_and_cache_scan()
+
+        cached = st.session_state.get(crit_state_key)
+        if cached is None:
+            return
+
+        crit_matches = cached["crit_matches"]
+        crit_universe_len = cached["crit_universe_len"]
+        crit_missing = cached["crit_missing"]
 
         if crit_missing:
             st.warning(f"Could not load data for: {', '.join(crit_missing)}")
 
-        if not crit_universe:
-            st.error("No price data available for the requested tickers.")
-            return
-
-        crit_matches = scan_universe(
-            crit_universe,
-            strategy_fn=strategy.scan_fn,
-            lookback_days=int(crit_lookback_days),
-            **typed_params,
-        )
         if crit_matches:
             st.success(
-                f"{len(crit_matches)} of {len(crit_universe)} ticker(s) currently meet entry "
+                f"{len(crit_matches)} of {crit_universe_len} ticker(s) currently meet entry "
                 f"criteria: {', '.join(sorted(crit_matches))}"
             )
         else:
-            st.info(f"None of the {len(crit_universe)} ticker(s) checked currently meet entry criteria.")
+            st.info(f"None of the {crit_universe_len} ticker(s) checked currently meet entry criteria.")
 
 
 def render_backtest_panel(strategy: Strategy, key_prefix: str) -> None:
@@ -495,49 +512,63 @@ def render_backtest_panel(strategy: Strategy, key_prefix: str) -> None:
 
     run_backtest = st.button("Run backtest", type="primary", key=f"{key_prefix}_bt_run")
 
-    if not run_backtest:
-        return
+    state_key = f"{key_prefix}_bt_state"
 
-    if bt_start >= bt_end:
-        st.error("Start date must be before end date.")
-        return
-    if bt_ticker is None:
-        return
-    if source in ("sample", "offline") and bt_interval in _INTRADAY_MAX_LOOKBACK_DAYS:
-        st.error(f"{source_label} is daily-only. Switch to Live (yfinance) for intraday bars.")
-        return
-    if bt_interval in _INTRADAY_MAX_LOOKBACK_DAYS:
-        max_lookback = _INTRADAY_MAX_LOOKBACK_DAYS[bt_interval]
-        if (bt_end - bt_start).days > max_lookback:
-            st.error(
-                f"{bt_interval_label} only has the trailing {max_lookback} days available "
-                "from yfinance. Narrow the date range."
-            )
+    def _run_and_cache_backtest() -> None:
+        if bt_start >= bt_end:
+            st.error("Start date must be before end date.")
             return
+        if bt_ticker is None:
+            return
+        if source in ("sample", "offline") and bt_interval in _INTRADAY_MAX_LOOKBACK_DAYS:
+            st.error(f"{source_label} is daily-only. Switch to Live (yfinance) for intraday bars.")
+            return
+        if bt_interval in _INTRADAY_MAX_LOOKBACK_DAYS:
+            max_lookback = _INTRADAY_MAX_LOOKBACK_DAYS[bt_interval]
+            if (bt_end - bt_start).days > max_lookback:
+                st.error(
+                    f"{bt_interval_label} only has the trailing {max_lookback} days available "
+                    "from yfinance. Narrow the date range."
+                )
+                return
 
-    # Fetch extra history before bt_start so the slowest SMA in this
-    # strategy is valid from the very first day of the window you asked
-    # for, instead of ramping up from NaN. Everything shown below is still
-    # trimmed/rebased back to exactly [bt_start, bt_end].
-    buffer_days = max(int(max_window) * _BAR_TO_CALENDAR_DAYS.get(bt_interval, 1.0) * 1.3, 5)
-    fetch_start = bt_start - dt.timedelta(days=int(buffer_days) + 5)
+        # Fetch extra history before bt_start so the slowest SMA in this
+        # strategy is valid from the very first day of the window you asked
+        # for, instead of ramping up from NaN. Everything shown below is still
+        # trimmed/rebased back to exactly [bt_start, bt_end].
+        buffer_days = max(int(max_window) * _BAR_TO_CALENDAR_DAYS.get(bt_interval, 1.0) * 1.3, 5)
+        fetch_start = bt_start - dt.timedelta(days=int(buffer_days) + 5)
 
-    used_offline_fallback = False
-    used_live_fallback = False
-    fallback_error = None
-    try:
-        with st.spinner(f"Loading {bt_ticker} price history..."):
-            if source == "sample":
-                df = load_sample_ticker(bt_ticker, start=fetch_start, end=bt_end, interval=bt_interval)
-            elif source == "offline":
-                try:
-                    df = load_offline_ticker(bt_ticker, start=fetch_start, end=bt_end, interval=bt_interval)
-                except Exception as exc:
-                    # Typed a ticker that isn't in data/historical_prices/
-                    # yet -- fetch it live instead of just failing, so
-                    # backtesting isn't limited to whatever's already been
-                    # pre-fetched. Mirror image of the yfinance branch's
-                    # fallback below.
+        used_offline_fallback = False
+        used_live_fallback = False
+        fallback_error = None
+        try:
+            with st.spinner(f"Loading {bt_ticker} price history..."):
+                if source == "sample":
+                    df = load_sample_ticker(bt_ticker, start=fetch_start, end=bt_end, interval=bt_interval)
+                elif source == "offline":
+                    try:
+                        df = load_offline_ticker(bt_ticker, start=fetch_start, end=bt_end, interval=bt_interval)
+                    except Exception as exc:
+                        # Typed a ticker that isn't in data/historical_prices/
+                        # yet -- fetch it live instead of just failing, so
+                        # backtesting isn't limited to whatever's already been
+                        # pre-fetched. Mirror image of the yfinance branch's
+                        # fallback below.
+                        try:
+                            df = fetch_yfinance_ticker(
+                                bt_ticker,
+                                start=fetch_start,
+                                end=bt_end,
+                                interval=bt_interval,
+                                max_age_hours=cache_max_age_hours,
+                                force_refresh=force_refresh,
+                            )
+                        except Exception:
+                            raise exc
+                        used_live_fallback = True
+                        fallback_error = exc
+                else:
                     try:
                         df = fetch_yfinance_ticker(
                             bt_ticker,
@@ -547,68 +578,94 @@ def render_backtest_panel(strategy: Strategy, key_prefix: str) -> None:
                             max_age_hours=cache_max_age_hours,
                             force_refresh=force_refresh,
                         )
-                    except Exception:
-                        raise exc
-                    used_live_fallback = True
-                    fallback_error = exc
-            else:
-                try:
-                    df = fetch_yfinance_ticker(
-                        bt_ticker,
-                        start=fetch_start,
-                        end=bt_end,
-                        interval=bt_interval,
-                        max_age_hours=cache_max_age_hours,
-                        force_refresh=force_refresh,
-                    )
-                except Exception as exc:
-                    # Live data unavailable (no network, rate-limited, bad
-                    # symbol that used to be good, ...) and
-                    # fetch_yfinance_ticker already tried a stale cache
-                    # first -- fall back to the saved offline dataset
-                    # (data/historical_prices/) so the backtest can still
-                    # run instead of just failing outright. This is a
-                    # single shared code path, so it covers every
-                    # strategy's Backtest tab, not just one.
-                    try:
-                        df = load_offline_ticker(bt_ticker, start=fetch_start, end=bt_end, interval=bt_interval)
-                    except Exception:
-                        raise exc
-                    used_offline_fallback = True
-                    fallback_error = exc
-    except Exception as exc:
-        st.error(f"Couldn't load data for '{bt_ticker}': {exc}")
+                    except Exception as exc:
+                        # Live data unavailable (no network, rate-limited, bad
+                        # symbol that used to be good, ...) and
+                        # fetch_yfinance_ticker already tried a stale cache
+                        # first -- fall back to the saved offline dataset
+                        # (data/historical_prices/) so the backtest can still
+                        # run instead of just failing outright. This is a
+                        # single shared code path, so it covers every
+                        # strategy's Backtest tab, not just one.
+                        try:
+                            df = load_offline_ticker(bt_ticker, start=fetch_start, end=bt_end, interval=bt_interval)
+                        except Exception:
+                            raise exc
+                        used_offline_fallback = True
+                        fallback_error = exc
+        except Exception as exc:
+            st.error(f"Couldn't load data for '{bt_ticker}': {exc}")
+            return
+
+        if used_offline_fallback:
+            st.info(
+                f"ℹ️ Live data wasn't available for '{bt_ticker}' ({fallback_error}) -- "
+                "backtesting against the saved offline dataset instead."
+            )
+        elif used_live_fallback:
+            st.info(
+                f"ℹ️ '{bt_ticker}' isn't in the offline dataset yet -- fetched it live instead."
+            )
+
+        typed_params = _typed_params(strategy, param_values)
+        try:
+            result = strategy.backtest_fn(
+                df, initial_capital=float(initial_capital), ticker=bt_ticker, **typed_params
+            )
+        except ValueError as exc:
+            st.error(str(exc))
+            return
+
+        start_ts, end_ts = pd.Timestamp(bt_start), pd.Timestamp(bt_end)
+        equity_visible = result.equity_curve.loc[start_ts:end_ts]
+        buy_hold_visible = result.buy_hold_curve.loc[start_ts:end_ts]
+
+        if len(equity_visible) < 2:
+            st.error(
+                "Not enough bars in the selected date range/interval to backtest. "
+                "Try a wider date range or a finer interval."
+            )
+            return
+
+        # Persist everything the render section below needs so a later
+        # rerun that *didn't* click "Run backtest" -- e.g. switching to a
+        # different strategy tab and back, or touching any other widget
+        # anywhere in the app -- still shows this same result instead of
+        # nothing. Streamlit reruns the whole script top-to-bottom on any
+        # interaction, and a button like `run_backtest` is only True on
+        # the one rerun immediately after it's clicked; everything below
+        # this point used to run only on that one rerun; now it's read
+        # back out of session_state on every other rerun too.
+        st.session_state[state_key] = {
+            "df": df,
+            "bt_ticker": bt_ticker,
+            "bt_start": bt_start,
+            "bt_end": bt_end,
+            "bt_interval_label": bt_interval_label,
+            "typed_params": typed_params,
+            "initial_capital": initial_capital,
+            "result": result,
+        }
+
+    if run_backtest:
+        _run_and_cache_backtest()
+
+    cached = st.session_state.get(state_key)
+    if cached is None:
         return
 
-    if used_offline_fallback:
-        st.info(
-            f"ℹ️ Live data wasn't available for '{bt_ticker}' ({fallback_error}) -- "
-            "backtesting against the saved offline dataset instead."
-        )
-    elif used_live_fallback:
-        st.info(
-            f"ℹ️ '{bt_ticker}' isn't in the offline dataset yet -- fetched it live instead."
-        )
-
-    typed_params = _typed_params(strategy, param_values)
-    try:
-        result = strategy.backtest_fn(
-            df, initial_capital=float(initial_capital), ticker=bt_ticker, **typed_params
-        )
-    except ValueError as exc:
-        st.error(str(exc))
-        return
+    df = cached["df"]
+    bt_ticker = cached["bt_ticker"]
+    bt_start = cached["bt_start"]
+    bt_end = cached["bt_end"]
+    bt_interval_label = cached["bt_interval_label"]
+    typed_params = cached["typed_params"]
+    initial_capital = cached["initial_capital"]
+    result = cached["result"]
 
     start_ts, end_ts = pd.Timestamp(bt_start), pd.Timestamp(bt_end)
     equity_visible = result.equity_curve.loc[start_ts:end_ts]
     buy_hold_visible = result.buy_hold_curve.loc[start_ts:end_ts]
-
-    if len(equity_visible) < 2:
-        st.error(
-            "Not enough bars in the selected date range/interval to backtest. "
-            "Try a wider date range or a finer interval."
-        )
-        return
 
     actual_data_start = df.index[0].date()
     if actual_data_start < bt_start:
