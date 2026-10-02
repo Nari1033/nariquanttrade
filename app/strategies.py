@@ -29,6 +29,7 @@ from engine.bollinger import backtest_bollinger_mean_reversion, bollinger_bands,
 from engine.options_backtester import backtest_bull_put_spread
 from engine.cash_secured_put import backtest_cash_secured_put
 from engine.wheel import backtest_wheel_strategy
+from engine.modified_wheel import backtest_modified_wheel_strategy
 from engine.rsi_strategy import backtest_rsi_momentum, rsi_breakout_recent
 from engine.rsi_ema_wma_strategy import (
     backtest_rsi_ema_wma,
@@ -144,6 +145,16 @@ def _wheel_scan(bars, lookback_days: int = 3, **kwargs) -> bool:
     # price history to price an option at all," not a timing signal.
     vol_window = int(kwargs.get("vol_window", 20))
     return len(bars) >= vol_window + 5
+
+
+def _modified_wheel_scan(bars, lookback_days: int = 3, **kwargs) -> bool:
+    # Same "enough history to price an option" eligibility check as the
+    # plain wheel, plus enough history for the down-market filter's own
+    # longest lookback (the trend SMA window) to have warmed up.
+    vol_window = int(kwargs.get("vol_window", 20))
+    trend_sma_window = int(kwargs.get("trend_sma_window", 200))
+    rsi_period = int(kwargs.get("rsi_period", 14))
+    return len(bars) >= max(vol_window, trend_sma_window, rsi_period) + 5
 
 
 def _rsi_momentum_scan(bars, lookback_days: int = 3, **kwargs) -> bool:
@@ -398,6 +409,59 @@ STRATEGIES: List[Strategy] = [
         ],
         scan_fn=_wheel_scan,
         backtest_fn=backtest_wheel_strategy,
+    ),
+    Strategy(
+        id="modified_wheel",
+        label="Modified Wheel (down-market filtered)",
+        description=(
+            "The Wheel, plus one addition: skip opening a new cash-secured "
+            "put while the market looks like it's in an ongoing decline. "
+            '"Bearish" is flagged when close is below its own trend SMA AND '
+            "RSI is below its threshold -- both built from indicators this "
+            "app already uses elsewhere (SMA, RSI), combined empirically "
+            "against 10 years of real SPY data to best flag days actually "
+            "followed by further declines (see engine.modified_wheel's "
+            "module docstring for the methodology). The filter only applies "
+            "to selling puts while flat -- once assigned, covered-call "
+            "selling against the shares you already own is unaffected, "
+            "same as the plain Wheel. Same Black-Scholes modeling caveats "
+            "as the other options strategies apply."
+        ),
+        params=[
+            NumberParam(
+                "put_delta", "Put delta", 0.20, 0.05, 0.50, step=0.05, is_int=False,
+                help="Target delta magnitude of the cash-secured put sold while flat.",
+            ),
+            NumberParam(
+                "call_delta", "Call delta", 0.20, 0.05, 0.50, step=0.05, is_int=False,
+                help="Target delta of the covered call sold while holding the shares.",
+            ),
+            NumberParam(
+                "dte_days", "Days to expiration", 30, 5, 90, step=1, is_int=True,
+                help="Days to expiration at entry, for both the puts and the calls.",
+            ),
+            NumberParam(
+                "entry_day_of_month", "Entry day of month (0 = any)", 0, 0, 28, step=1, is_int=True,
+                help=(
+                    'Only open a new position within 5 calendar days of this day of the month (e.g. 1 = near month-start, 15 = mid-month, 28 = month-end). 0 = no day-of-month filter -- enter whenever the other conditions are met, same as before this existed.'
+                ),
+            ),
+            NumberParam(
+                "trend_sma_window", "Down-market filter: trend SMA window", 200, 20, 250, step=10, is_int=True,
+                is_sma_window=True,
+                help="New puts are blocked while close is below this SMA (a long-term downtrend) AND RSI is weak -- see the strategy description.",
+            ),
+            NumberParam(
+                "rsi_period", "Down-market filter: RSI period", 14, 2, 50, step=1, is_int=True,
+                help="RSI period used by the down-market filter (not the same RSI as the RSI strategies' own tabs).",
+            ),
+            NumberParam(
+                "rsi_threshold", "Down-market filter: RSI threshold", 40.0, 10.0, 60.0, step=1.0, is_int=False,
+                help="New puts are blocked when RSI is below this AND close is below the trend SMA. Lower = filter fires less often (only clearer weakness); higher = fires more often.",
+            ),
+        ],
+        scan_fn=_modified_wheel_scan,
+        backtest_fn=backtest_modified_wheel_strategy,
     ),
     Strategy(
         id="rsi_momentum",
